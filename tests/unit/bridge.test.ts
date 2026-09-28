@@ -28,6 +28,19 @@ describe('Native WebKit Bridge', () => {
     expect(typeof window.electronAPI.openFileDialog).toBe('function');
     expect(typeof window.electronAPI.readFile).toBe('function');
     expect(typeof window.electronAPI.onOpenFile).toBe('function');
+    expect(typeof window.electronAPI.rendererReady).toBe('function');
+    expect(typeof window.electronAPI.beginWindowDrag).toBe('function');
+  });
+
+  it('sends renderer readiness and native window drag actions', () => {
+    const readyPromise = window.electronAPI.rendererReady();
+    const dragPromise = window.electronAPI.beginWindowDrag();
+
+    expect(mockPostMessage.mock.calls[0][0].action).toBe('app:renderer-ready');
+    expect(mockPostMessage.mock.calls[1][0].action).toBe('window:begin-drag');
+    window.handleNativeResponse!(mockPostMessage.mock.calls[0][0].id, { success: true });
+    window.handleNativeResponse!(mockPostMessage.mock.calls[1][0].id, { success: true });
+    return Promise.all([readyPromise, dragPromise]);
   });
 
   it('sends message to nativeAPI and resolves when handleNativeResponse is called', async () => {
@@ -58,6 +71,27 @@ describe('Native WebKit Bridge', () => {
     window.handleNativeResponse!(sentData.id, null, 'File not found');
 
     await expect(promise).rejects.toThrow('File not found');
+  });
+
+  it('keeps file dialogs pending while the user browses', async () => {
+    vi.useFakeTimers();
+    try {
+      const promise = window.electronAPI.openFileDialog();
+      const sentData = mockPostMessage.mock.calls[0][0];
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      window.handleNativeResponse!(sentData.id, {
+        canceled: false,
+        filePath: '/path/to/slow-selection.md'
+      });
+
+      await expect(promise).resolves.toEqual({
+        canceled: false,
+        filePath: '/path/to/slow-selection.md'
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('dispatches app:open-file event to registered callback', () => {

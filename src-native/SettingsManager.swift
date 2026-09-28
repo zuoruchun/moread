@@ -7,26 +7,25 @@ public final class SettingsManager: @unchecked Sendable {
     private let fileManager = FileManager.default
     private let configURL: URL
 
-    private init() {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    private convenience init() {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let appDir = appSupport.appendingPathComponent("moread", isDirectory: true)
+        self.init(configURL: appDir.appendingPathComponent("moread-config.json"))
+    }
 
-        if !fileManager.fileExists(atPath: appDir.path) {
-            try? fileManager.createDirectory(at: appDir, withIntermediateDirectories: true, attributes: nil)
+    public init(configURL: URL) {
+        self.configURL = configURL
+        let parent = configURL.deletingLastPathComponent()
+        if !fileManager.fileExists(atPath: parent.path) {
+            try? fileManager.createDirectory(at: parent, withIntermediateDirectories: true, attributes: nil)
         }
-        self.configURL = appDir.appendingPathComponent("moread-config.json")
     }
 
     public func getSettings() -> [String: Any] {
         lock.lock()
         defer { lock.unlock() }
 
-        let defaults: [String: Any] = [
-            "theme": "system",
-            "readingWidth": "standard",
-            "fontSize": 16,
-            "recentFiles": []
-        ]
+        let defaults = defaultSettings()
 
         guard fileManager.fileExists(atPath: configURL.path),
               let data = try? Data(contentsOf: configURL),
@@ -59,12 +58,7 @@ public final class SettingsManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        let defaults: [String: Any] = [
-            "theme": "system",
-            "readingWidth": "standard",
-            "fontSize": 16,
-            "recentFiles": []
-        ]
+        let defaults = defaultSettings()
 
         if let data = try? JSONSerialization.data(withJSONObject: defaults, options: [.prettyPrinted]) {
             try? data.write(to: configURL, options: .atomic)
@@ -72,12 +66,7 @@ public final class SettingsManager: @unchecked Sendable {
     }
 
     private func getSettingsInternal() -> [String: Any] {
-        let defaults: [String: Any] = [
-            "theme": "system",
-            "readingWidth": "standard",
-            "fontSize": 16,
-            "recentFiles": []
-        ]
+        let defaults = defaultSettings()
 
         guard fileManager.fileExists(atPath: configURL.path),
               let data = try? Data(contentsOf: configURL),
@@ -90,5 +79,16 @@ public final class SettingsManager: @unchecked Sendable {
             merged[k] = v
         }
         return merged
+    }
+
+    private func defaultSettings() -> [String: Any] {
+        [
+            "theme": "system",
+            "readingWidth": "standard",
+            "fontSize": 16,
+            "recentFiles": [],
+            "showSidebar": false,
+            "allowRemoteImages": false
+        ]
     }
 }

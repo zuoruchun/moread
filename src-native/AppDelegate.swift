@@ -2,39 +2,69 @@ import Cocoa
 
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     public var mainWindowController: MainWindowController?
+    private var pendingOpenFilePaths: [String] = []
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         setupMainMenu()
 
         let controller = MainWindowController()
         self.mainWindowController = controller
-        controller.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        controller.presentWindow()
 
         // Check command-line arguments for file paths to open
-        let args = CommandLine.arguments
-        if args.count > 1 {
-            let possibleFile = args[1]
-            if !possibleFile.hasPrefix("-") {
-                let expanded = NSString(string: possibleFile).expandingTildeInPath
-                let url = URL(fileURLWithPath: expanded).standardizedFileURL
-                if FileManager.default.fileExists(atPath: url.path) {
-                    controller.openFile(url.path)
-                }
-            }
+        let commandLineFiles = CommandLine.arguments.dropFirst().compactMap(normalizedMarkdownPath)
+        let filesToOpen = deduplicated(pendingOpenFilePaths + commandLineFiles)
+        pendingOpenFilePaths.removeAll()
+        if !filesToOpen.isEmpty {
+            controller.openFiles(filesToOpen)
         }
     }
 
     public func application(_ sender: NSApplication, openFile filename: String) -> Bool {
-        mainWindowController?.openFile(filename)
+        guard let path = normalizedMarkdownPath(filename) else { return false }
+        openFiles([path])
         return true
+    }
+
+    public func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        let paths = filenames.compactMap(normalizedMarkdownPath)
+        openFiles(paths)
+        sender.reply(toOpenOrPrint: paths.isEmpty ? .failure : .success)
     }
 
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
-            mainWindowController?.showWindow(nil)
+            mainWindowController?.presentWindow()
         }
         return true
+    }
+
+    private func openFiles(_ paths: [String]) {
+        guard !paths.isEmpty else { return }
+        if let controller = mainWindowController {
+            controller.presentWindow()
+            controller.openFiles(paths)
+        } else {
+            pendingOpenFilePaths = deduplicated(pendingOpenFilePaths + paths)
+        }
+    }
+
+    private func normalizedMarkdownPath(_ rawPath: String) -> String? {
+        guard !rawPath.hasPrefix("-") else { return nil }
+        let expanded = NSString(string: rawPath).expandingTildeInPath
+        let url = URL(fileURLWithPath: expanded).standardizedFileURL
+        let ext = url.pathExtension.lowercased()
+        guard ext == "md" || ext == "markdown" else { return nil }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            return nil
+        }
+        return url.path
+    }
+
+    private func deduplicated(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        return paths.filter { seen.insert($0).inserted }
     }
 
     // MARK: - Menu Setup
@@ -146,7 +176,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func menuSearch() {
-        mainWindowController?.nativeBridge.notifyMenuAction("search")
+        mainWindowController?.nativeBridge.notifyMenuAction("find")
     }
 
     @objc private func menuToggleOutline() {

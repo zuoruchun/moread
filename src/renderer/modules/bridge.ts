@@ -1,5 +1,7 @@
 // Bridge between WebKit WKWebView (or Electron) and Frontend
 export interface BridgeAPI {
+  rendererReady: () => Promise<void>;
+  beginWindowDrag: () => Promise<void>;
   openFileDialog: () => Promise<{ canceled: boolean; filePath?: string }>;
   openFolderDialog: () => Promise<{ canceled: boolean; folderPath?: string }>;
   readFile: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string; stats?: { size: number; mtime: number } }>;
@@ -33,7 +35,7 @@ declare global {
 interface PendingCallback {
   resolve: (value: any) => void;
   reject: (reason?: any) => void;
-  timer: any;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 const pendingCallbacks = new Map<string, PendingCallback>();
@@ -45,7 +47,7 @@ export function registerGlobalHandlers() {
     g.handleNativeResponse = (id: string, result: any, error?: string) => {
       const pending = pendingCallbacks.get(id);
       if (pending) {
-        clearTimeout(pending.timer);
+        if (pending.timer) clearTimeout(pending.timer);
         pendingCallbacks.delete(id);
         if (error) {
           pending.reject(new Error(error));
@@ -80,10 +82,12 @@ function callNative<T = any>(action: string, payload?: any, timeoutMs = 15000): 
     }
 
     const id = 'req_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
-    const timer = setTimeout(() => {
-      pendingCallbacks.delete(id);
-      reject(new Error(`Native request timed out for action: ${action}`));
-    }, timeoutMs);
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          pendingCallbacks.delete(id);
+          reject(new Error(`Native request timed out for action: ${action}`));
+        }, timeoutMs)
+      : null;
 
     pendingCallbacks.set(id, { resolve, reject, timer });
 
@@ -94,7 +98,7 @@ function callNative<T = any>(action: string, payload?: any, timeoutMs = 15000): 
         payload: payload ?? {}
       });
     } catch (err) {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       pendingCallbacks.delete(id);
       reject(err);
     }
@@ -116,8 +120,10 @@ export function initNativeBridge(): BridgeAPI {
   // If running inside WKWebView (Native Swift Host)
   if (typeof window !== 'undefined' && window.webkit?.messageHandlers?.nativeAPI) {
     const nativeAPI: BridgeAPI = {
-      openFileDialog: () => callNative('dialog:open-file'),
-      openFolderDialog: () => callNative('dialog:open-folder'),
+      rendererReady: () => callNative('app:renderer-ready'),
+      beginWindowDrag: () => callNative('window:begin-drag'),
+      openFileDialog: () => callNative('dialog:open-file', undefined, 0),
+      openFolderDialog: () => callNative('dialog:open-folder', undefined, 0),
       readFile: (filePath: string) => callNative('fs:read-file', { filePath }),
       readFolder: (folderPath: string) => callNative('fs:read-folder', { folderPath }),
       showInFolder: (filePath: string) => callNative('fs:show-in-folder', { filePath }),

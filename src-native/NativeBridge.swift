@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     public weak var windowController: MainWindowController?
     private var fileWatcher: FileWatcher?
+    private let authorizationLock = NSLock()
+    private var authorizedDirectories = Set<String>()
 
     public override init() {
         super.init()
@@ -24,6 +26,12 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
 
         // Dispatch background tasks off the main thread, except UI dialogs
         switch action {
+        case "app:renderer-ready":
+            windowController?.rendererDidBecomeReady()
+            sendResponse(id: id, result: ["success": true])
+        case "window:begin-drag":
+            windowController?.beginWindowDrag()
+            sendResponse(id: id, result: ["success": true])
         case "dialog:open-file":
             handleOpenFile(id: id)
         case "dialog:open-folder":
@@ -68,6 +76,7 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
 
             panel.beginSheetModal(for: window) { response in
                 if response == .OK, let url = panel.url {
+                    self.authorizeFile(url.path)
                     self.sendResponse(id: id, result: ["canceled": false, "filePath": url.path])
                 } else {
                     self.sendResponse(id: id, result: ["canceled": true])
@@ -87,6 +96,7 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
 
             panel.beginSheetModal(for: window) { response in
                 if response == .OK, let url = panel.url {
+                    self.authorizeDirectory(url.path)
                     self.sendResponse(id: id, result: ["canceled": false, "folderPath": url.path])
                 } else {
                     self.sendResponse(id: id, result: ["canceled": true])
@@ -104,6 +114,17 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
 
         let expandedPath = NSString(string: filePath).expandingTildeInPath
         let url = URL(fileURLWithPath: expandedPath).standardizedFileURL
+        let ext = url.pathExtension.lowercased()
+
+        guard ext == "md" || ext == "markdown" else {
+            sendResponse(id: id, result: ["success": false, "error": "仅支持读取 Markdown 文件"])
+            return
+        }
+
+        guard isAuthorized(url.path) else {
+            sendResponse(id: id, result: ["success": false, "error": "文件不在用户已授权的目录中"])
+            return
+        }
 
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
@@ -156,6 +177,7 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
         // Start file watcher for live reload on modification
         DispatchQueue.main.async { [weak self] in
             self?.fileWatcher?.watch(filePath: url.path)
+            self?.windowController?.allowLocalResources(forDocument: url.path)
         }
 
         sendResponse(id: id, result: [
@@ -173,6 +195,11 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
 
         let expandedPath = NSString(string: folderPath).expandingTildeInPath
         let url = URL(fileURLWithPath: expandedPath).standardizedFileURL
+
+        guard isAuthorized(url.path) else {
+            sendResponse(id: id, result: ["success": false, "error": "文件夹未获得用户授权"])
+            return
+        }
 
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
@@ -268,6 +295,9 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
     // MARK: - Store Handlers
     private func handleGetSettings(id: String) {
         let settings = SettingsManager.shared.getSettings()
+        if let recentFiles = settings["recentFiles"] as? [String] {
+            recentFiles.forEach(authorizeFile)
+        }
         sendResponse(id: id, result: settings)
     }
 
@@ -323,6 +353,25 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
             let js = "window.handleNativeEvent('menu:action', \(quoteJsString(action)));"
             webView.evaluateJavaScript(js, completionHandler: nil)
         }
+    }
+
+    public func authorizeFile(_ filePath: String) {
+        let directory = URL(fileURLWithPath: filePath).standardizedFileURL.deletingLastPathComponent().path
+        authorizeDirectory(directory)
+    }
+
+    public func authorizeDirectory(_ directoryPath: String) {
+        let directory = URL(fileURLWithPath: directoryPath).standardizedFileURL.path
+        authorizationLock.lock()
+        authorizedDirectories.insert(directory)
+        authorizationLock.unlock()
+    }
+
+    private func isAuthorized(_ filePath: String) -> Bool {
+        authorizationLock.lock()
+        let directories = authorizedDirectories
+        authorizationLock.unlock()
+        return directories.contains { LocalFileAccessPolicy.isPath(filePath, inside: $0) }
     }
 }
 

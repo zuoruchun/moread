@@ -27,13 +27,14 @@ public final class FileWatcher: @unchecked Sendable {
     private func startWatching(path: String) {
         guard !isStopped else { return }
 
-        fileDescriptor = open(path, O_EVTONLY)
-        guard fileDescriptor >= 0 else {
+        let descriptor = open(path, O_EVTONLY)
+        guard descriptor >= 0 else {
             return
         }
+        fileDescriptor = descriptor
 
         let src = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fileDescriptor,
+            fileDescriptor: descriptor,
             eventMask: [.write, .delete, .rename, .extend, .attrib],
             queue: queue
         )
@@ -51,9 +52,9 @@ public final class FileWatcher: @unchecked Sendable {
         }
 
         src.setCancelHandler { [weak self] in
+            close(descriptor)
             guard let self = self else { return }
-            if self.fileDescriptor >= 0 {
-                close(self.fileDescriptor)
+            if self.fileDescriptor == descriptor {
                 self.fileDescriptor = -1
             }
         }
@@ -95,6 +96,7 @@ public final class FileWatcher: @unchecked Sendable {
         debounceWorkItem = nil
         currentFilePath = nil
         if let src = source {
+            fileDescriptor = -1
             src.cancel()
             source = nil
         }

@@ -62,4 +62,23 @@ describe('Markdown Parser & Academic Content Pipeline', () => {
     expect(html).not.toContain('onerror');
     expect(html).not.toContain('javascript:');
   });
+
+  it('should route relative local images through the protected native scheme', () => {
+    const html = parseMarkdown('![plot](figures/result.png)', {
+      currentFilePath: '/research/paper.md'
+    });
+    expect(html).toContain('mored://local?path=%2Fresearch%2Ffigures%2Fresult.png');
+  });
+
+  it('should block remote images unless explicitly enabled', () => {
+    const blocked = parseMarkdown('![remote](https://example.com/plot.png)', {
+      currentFilePath: '/research/paper.md'
+    });
+    const allowed = parseMarkdown('![remote](https://example.com/plot.png)', {
+      currentFilePath: '/research/paper.md',
+      allowRemoteImages: true
+    });
+    expect(blocked).toContain('远程图片已拦截');
+    expect(allowed).toContain('https://example.com/plot.png');
+  });
 });

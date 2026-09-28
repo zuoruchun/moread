@@ -6,7 +6,7 @@ echo "  墨读 MoRead - Native Swift/WebKit Build"
 echo "=========================================="
 
 APP_NAME="MoRead"
-VERSION="1.0.1"
+VERSION="1.1.0"
 DIST_DIR="$(pwd)/dist"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 CONTENTS="${APP_BUNDLE}/Contents"
@@ -27,7 +27,7 @@ mkdir -p "${WEB_DIR}"
 
 # 3. Compile Swift Native App
 echo "[3/6] Compiling Swift Native AppKit + WebKit Host..."
-swiftc -O -target arm64-apple-macos14.0 \
+swiftc -O -module-cache-path /tmp/moread-build-module-cache -target arm64-apple-macos14.0 \
   -framework Cocoa \
   -framework WebKit \
   -framework UniformTypeIdentifiers \
@@ -35,6 +35,7 @@ swiftc -O -target arm64-apple-macos14.0 \
   src-native/AppDelegate.swift \
   src-native/MainWindowController.swift \
   src-native/NativeBridge.swift \
+  src-native/LocalFileSchemeHandler.swift \
   src-native/FileWatcher.swift \
   src-native/SettingsManager.swift \
   -o "${MACOS_DIR}/${APP_NAME}"

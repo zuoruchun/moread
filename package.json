@@ -1,6 +1,6 @@
 {
   "name": "moread",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "墨读 MoRead - 个人自用 macOS Markdown 阅读器 (Swift/AppKit + WKWebView)",
   "author": "Ruchun Zuo",
   "scripts": {
@@ -8,7 +8,7 @@
     "build:web": "tsc && vite build",
     "build": "./build-native.sh",
     "test": "vitest run",
-    "test:native": "swiftc -O -target arm64-apple-macos14.0 src-native/SettingsManager.swift src-native/FileWatcher.swift tests/native/TestNativeSuite.swift -o /tmp/run_native_tests && /tmp/run_native_tests"
+    "test:native": "swiftc -O -module-cache-path /tmp/moread-swift-module-cache -target arm64-apple-macos14.0 -framework WebKit -framework UniformTypeIdentifiers src-native/SettingsManager.swift src-native/FileWatcher.swift src-native/LocalFileSchemeHandler.swift tests/native/TestNativeSuite.swift -o /tmp/run_native_tests && /tmp/run_native_tests"
   },
   "dependencies": {
     "dompurify": "^3.1.6",

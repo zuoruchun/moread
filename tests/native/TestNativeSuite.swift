@@ -167,6 +167,12 @@ struct TestRunner {
             var isDir: ObjCBool = false
             _ = FileManager.default.fileExists(atPath: fixturesURL.path, isDirectory: &isDir)
             assertTrue(isDir.boolValue, "Directory path identified, guarded from being read as file")
+
+            let allowedRoot = fixturesURL.appendingPathComponent("special paths").path
+            let allowedImage = fixturesURL.appendingPathComponent("special paths/image.png").path
+            let traversalTarget = fixturesURL.appendingPathComponent("outside.png").path
+            assertTrue(LocalFileAccessPolicy.isPath(allowedImage, inside: allowedRoot), "Local image inside the document directory is allowed")
+            assertTrue(!LocalFileAccessPolicy.isPath(traversalTarget, inside: allowedRoot), "Local image directory traversal is rejected")
         }
 
         // ----------------------------------------------------
@@ -198,7 +204,10 @@ struct TestRunner {
         // ----------------------------------------------------
         print("\n[Group 5: Settings Persistence]")
         do {
-            let settingsManager = SettingsManager.shared
+            let settingsURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("moread_settings_test_\(UUID().uuidString)")
+                .appendingPathComponent("moread-config.json")
+            let settingsManager = SettingsManager(configURL: settingsURL)
             let initial = settingsManager.getSettings()
             assertTrue(initial["theme"] != nil, "Settings contains theme property")
             assertTrue(initial["readingWidth"] != nil, "Settings contains readingWidth property")
@@ -208,7 +217,7 @@ struct TestRunner {
             assertEqual(updated["theme"] as? String, "dark", "Theme updated to dark and persisted")
             assertEqual(updated["fontSize"] as? Int, 18, "FontSize updated to 18 and persisted")
 
-            settingsManager.saveSettings(["theme": "system", "fontSize": 16])
+            try? FileManager.default.removeItem(at: settingsURL.deletingLastPathComponent())
         }
 
         // ----------------------------------------------------
@@ -247,6 +256,29 @@ struct TestRunner {
             watcher.stop()
             assertTrue(changeDetected, "FileWatcher correctly detected file modification and notified")
             try? FileManager.default.removeItem(at: tempFile)
+
+            let firstFile = tempDir.appendingPathComponent("moread_watch_first_\(UUID().uuidString).md")
+            let secondFile = tempDir.appendingPathComponent("moread_watch_second_\(UUID().uuidString).md")
+            try "First\n".write(to: firstFile, atomically: true, encoding: .utf8)
+            try "Second\n".write(to: secondFile, atomically: true, encoding: .utf8)
+            var switchedPath: String?
+            let switchingWatcher = FileWatcher { switchedPath = $0 }
+            switchingWatcher.watch(filePath: firstFile.path)
+            switchingWatcher.watch(filePath: secondFile.path)
+            Thread.sleep(forTimeInterval: 0.1)
+            let secondHandle = try FileHandle(forWritingTo: secondFile)
+            secondHandle.seekToEndOfFile()
+            secondHandle.write("Changed\n".data(using: .utf8)!)
+            try secondHandle.close()
+
+            let switchDeadline = Date(timeIntervalSinceNow: 1.5)
+            while switchedPath == nil && Date() < switchDeadline {
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.1))
+            }
+            switchingWatcher.stop()
+            assertTrue(switchedPath == secondFile.path, "FileWatcher survives an immediate switch to a second document")
+            try? FileManager.default.removeItem(at: firstFile)
+            try? FileManager.default.removeItem(at: secondFile)
         } catch {
             assertTrue(false, "FileWatcher test failed: \(error)")
         }

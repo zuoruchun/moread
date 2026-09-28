@@ -119,13 +119,10 @@ export class MoReadApp {
   }
 
   private async initApp(): Promise<void> {
-    if (window.electronAPI) {
-      this.currentSettings = await window.electronAPI.getSettings();
-      this.applySettings(this.currentSettings);
-      this.renderRecentList(this.currentSettings.recentFiles || []);
-
-      window.electronAPI.onOpenFile((filePath) => this.loadFile(filePath));
-      window.electronAPI.onOpenFolder?.(async (folderPath) => {
+    const api = window.electronAPI;
+    if (api) {
+      api.onOpenFile((filePath) => this.loadFile(filePath));
+      api.onOpenFolder?.(async (folderPath) => {
         const folderRes = await window.electronAPI.readFolder(folderPath);
         if (folderRes.success && folderRes.nodes) {
           this.fileTreeController.update(folderRes.nodes, this.currentFilePath);
@@ -133,12 +130,33 @@ export class MoReadApp {
           this.showSidebar();
         }
       });
-      window.electronAPI.onFileChanged((changedPath) => {
+      api.onFileChanged((changedPath) => {
         if (this.currentFilePath === changedPath) {
           this.reloadCurrentFilePreservingScroll();
         }
       });
-      window.electronAPI.onMenuAction((action) => this.handleMenuAction(action));
+      api.onMenuAction((action) => this.handleMenuAction(action));
+
+      try {
+        this.currentSettings = await api.getSettings();
+        this.applySettings(this.currentSettings);
+        this.renderRecentList(this.currentSettings.recentFiles || []);
+      } catch (error) {
+        console.error('Failed to load settings:', error);
+        this.currentSettings = {
+          theme: 'system',
+          readingWidth: 'standard',
+          fontSize: 16,
+          recentFiles: []
+        };
+        this.applySettings(this.currentSettings);
+      } finally {
+        try {
+          await api.rendererReady();
+        } catch (error) {
+          console.error('Failed to notify native host that the renderer is ready:', error);
+        }
+      }
     }
   }
 
@@ -148,6 +166,7 @@ export class MoReadApp {
     document.getElementById('btn-welcome-open-folder')?.addEventListener('click', () => this.triggerOpenFolder());
     document.getElementById('btn-clear-recent')?.addEventListener('click', async () => {
       if (window.electronAPI) {
+        this.currentSettings = { ...this.currentSettings, recentFiles: [] };
         await window.electronAPI.saveSettings({ recentFiles: [] });
         this.renderRecentList([]);
       }
@@ -180,23 +199,14 @@ export class MoReadApp {
     this.outlineTabBtn.addEventListener('click', () => this.switchSidebarTab('outline'));
     this.filesTabBtn.addEventListener('click', () => this.switchSidebarTab('files'));
 
-    // Global Drag & Drop for Markdown files
-    window.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-    });
-
-    window.addEventListener('drop', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const files = e.dataTransfer?.files;
-      if (files && files.length > 0) {
-        const file = files[0];
-        const ext = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
-        if (ext === '.md' || ext === '.markdown') {
-          this.loadFile((file as any).path || file.name);
-        }
-      }
+    const appHeader = document.querySelector('.app-header');
+    appHeader?.addEventListener('mousedown', (event) => {
+      const mouseEvent = event as MouseEvent;
+      const target = event.target as HTMLElement;
+      if (mouseEvent.button !== 0 || target.closest('button, select, input, textarea, a')) return;
+      window.electronAPI?.beginWindowDrag().catch((error) => {
+        console.error('Failed to begin native window drag:', error);
+      });
     });
 
     // System theme change listener
@@ -276,6 +286,7 @@ export class MoReadApp {
 
     this.currentFilePath = filePath;
     this.currentRawContent = res.content;
+    this.recordRecentFile(filePath);
 
     // Update title and path
     const fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
@@ -369,8 +380,10 @@ export class MoReadApp {
   public toggleSidebar(): void {
     if (this.sidebarEl.classList.contains('collapsed')) {
       this.showSidebar();
+      this.saveSetting({ showSidebar: true });
     } else {
       this.hideSidebar();
+      this.saveSetting({ showSidebar: false });
     }
   }
 
@@ -388,8 +401,10 @@ export class MoReadApp {
     if (this.sidebarEl.classList.contains('collapsed')) {
       this.switchSidebarTab('outline');
       this.showSidebar();
+      this.saveSetting({ showSidebar: true });
     } else if (this.outlineTabBtn.classList.contains('active')) {
       this.hideSidebar();
+      this.saveSetting({ showSidebar: false });
     } else {
       this.switchSidebarTab('outline');
     }
@@ -471,7 +486,21 @@ export class MoReadApp {
 
   private saveSetting(update: any): void {
     this.currentSettings = { ...this.currentSettings, ...update };
-    window.electronAPI?.saveSettings(this.currentSettings);
+    window.electronAPI?.saveSettings(this.currentSettings).catch((error) => {
+      console.error('Failed to save settings:', error);
+    });
+  }
+
+  private recordRecentFile(filePath: string): void {
+    const existing = Array.isArray(this.currentSettings.recentFiles)
+      ? this.currentSettings.recentFiles.filter((path: unknown): path is string => typeof path === 'string')
+      : [];
+    const recentFiles = [filePath, ...existing.filter((path: string) => path !== filePath)].slice(0, 8);
+    this.currentSettings = { ...this.currentSettings, recentFiles, lastOpenedFile: filePath };
+    this.renderRecentList(recentFiles);
+    window.electronAPI?.saveSettings({ recentFiles, lastOpenedFile: filePath }).catch((error) => {
+      console.error('Failed to update recent files:', error);
+    });
   }
 
   private renderRecentList(recentFiles: string[]): void {
@@ -534,6 +563,7 @@ export class MoReadApp {
         this.toggleSourceView();
         break;
       case 'find':
+      case 'search':
         this.searchController.open();
         break;
       case 'reload':
