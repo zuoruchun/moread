@@ -56,11 +56,19 @@ codesign --force --deep --sign - "${APP_BUNDLE}"
 echo "[6/6] Packaging DMG and ZIP..."
 DMG_PATH="${DIST_DIR}/${APP_NAME}-${VERSION}-arm64.dmg"
 ZIP_PATH="${DIST_DIR}/${APP_NAME}-${VERSION}-arm64.zip"
+DMG_STAGING="${DIST_DIR}/dmg-staging"
 
 rm -f "${DMG_PATH}" "${ZIP_PATH}"
+rm -rf "${DMG_STAGING}"
+
+# Create Staging Directory with Applications drag-and-drop link
+mkdir -p "${DMG_STAGING}"
+cp -R "${APP_BUNDLE}" "${DMG_STAGING}/"
+ln -s /Applications "${DMG_STAGING}/Applications"
 
 # Create DMG
-hdiutil create -volname "${APP_NAME}" -srcfolder "${APP_BUNDLE}" -ov -format UDZO "${DMG_PATH}"
+hdiutil create "${DMG_PATH}" -volname "${APP_NAME}" -srcfolder "${DMG_STAGING}" -ov -format UDZO
+rm -rf "${DMG_STAGING}"
 
 # Create ZIP
 ditto -c -k --keepParent "${APP_BUNDLE}" "${ZIP_PATH}"
