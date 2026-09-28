@@ -25,8 +25,8 @@
 | 文件名称 | 格式与架构 | 体积 | 说明 |
 | :--- | :--- | :--- | :--- |
 | **`dist/MoRead.app`** | macOS 原生 App (`arm64`) | **3.1 MB** | Swift 6 + AppKit 原生应用程序包 |
-| **`dist/MoRead-1.0.0-arm64.dmg`** | APFS 磁盘映像安装包 | **1.6 MB** | 极轻量原生安装包（较原架构缩减 98.5%） |
-| **`dist/MoRead-1.0.0-arm64.zip`** | ZIP 便携压缩包 | **1.3 MB** | 保留 Unix 权限与软链接的备用发布包 |
+| **`dist/MoRead-1.0.1-arm64.dmg`** | APFS 磁盘映像安装包 | **1.6 MB** | 极轻量原生安装包（含 Applications 拖拽安装快捷方式） |
+| **`dist/MoRead-1.0.1-arm64.zip`** | ZIP 便携压缩包 | **1.3 MB** | 保留 Unix 权限与软链接的备用发布包 |
 | **`dist/SHA256SUMS.txt`** | 校验和清单 | 178 B | 记录 DMG 与 ZIP 文件的 SHA-256 签名 |
 
 ---
@@ -34,7 +34,7 @@
 ## 🚀 安装与使用指南
 
 ### 1. 本机直接使用（推荐）
-双击打开 `dist/MoRead-1.0.0-arm64.dmg`，将 **MoRead** 图标拖入 **Applications** 目录即可。
+双击打开 `dist/MoRead-1.0.1-arm64.dmg`，将 **MoRead** 图标直接拖拽至窗口右侧的 **Applications** 目录即可。
 
 ### 2. 权限与代码签名说明
 本应用采用 macOS 本地 ad-hoc 代码签名（`codesign -s -`），已在本机（macOS 27.0 Apple M3 arm64）上完成全链路安装与独立冷启动验证。
