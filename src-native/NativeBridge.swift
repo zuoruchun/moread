@@ -1,0 +1,364 @@
+import Foundation
+import WebKit
+import Cocoa
+import UniformTypeIdentifiers
+
+public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Sendable {
+    public weak var windowController: MainWindowController?
+    private var fileWatcher: FileWatcher?
+
+    public override init() {
+        super.init()
+        self.fileWatcher = FileWatcher { [weak self] changedPath in
+            self?.notifyFileChanged(changedPath)
+        }
+    }
+
+    public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any],
+              let id = body["id"] as? String,
+              let action = body["action"] as? String else {
+            return
+        }
+        let payload = body["payload"] as? [String: Any] ?? [:]
+
+        // Dispatch background tasks off the main thread, except UI dialogs
+        switch action {
+        case "dialog:open-file":
+            handleOpenFile(id: id)
+        case "dialog:open-folder":
+            handleOpenFolder(id: id)
+        case "fs:read-file":
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.handleReadFile(id: id, payload: payload)
+            }
+        case "fs:read-folder":
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.handleReadFolder(id: id, payload: payload)
+            }
+        case "fs:show-in-folder":
+            handleShowInFolder(id: id, payload: payload)
+        case "shell:open-external":
+            handleOpenExternal(id: id, payload: payload)
+        case "store:get-settings":
+            handleGetSettings(id: id)
+        case "store:save-settings":
+            handleSaveSettings(id: id, payload: payload)
+        case "store:clear-all":
+            handleClearAll(id: id)
+        default:
+            sendResponse(id: id, result: nil, error: "未知的操作指令: \(action)")
+        }
+    }
+
+    // MARK: - Dialog Handlers
+    private func handleOpenFile(id: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let window = self.windowController?.window else { return }
+            let panel = NSOpenPanel()
+            panel.title = "选择 Markdown 文件"
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
+            panel.allowedContentTypes = [
+                UTType(filenameExtension: "md") ?? .plainText,
+                UTType(filenameExtension: "markdown") ?? .plainText,
+                .plainText
+            ]
+
+            panel.beginSheetModal(for: window) { response in
+                if response == .OK, let url = panel.url {
+                    self.sendResponse(id: id, result: ["canceled": false, "filePath": url.path])
+                } else {
+                    self.sendResponse(id: id, result: ["canceled": true])
+                }
+            }
+        }
+    }
+
+    private func handleOpenFolder(id: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let window = self.windowController?.window else { return }
+            let panel = NSOpenPanel()
+            panel.title = "选择包含 Markdown 的文件夹"
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.allowsMultipleSelection = false
+
+            panel.beginSheetModal(for: window) { response in
+                if response == .OK, let url = panel.url {
+                    self.sendResponse(id: id, result: ["canceled": false, "folderPath": url.path])
+                } else {
+                    self.sendResponse(id: id, result: ["canceled": true])
+                }
+            }
+        }
+    }
+
+    // MARK: - File System Handlers (Strictly Read-Only)
+    private func handleReadFile(id: String, payload: [String: Any]) {
+        guard let filePath = payload["filePath"] as? String, !filePath.isEmpty else {
+            sendResponse(id: id, result: ["success": false, "error": "无效的文件路径"])
+            return
+        }
+
+        let expandedPath = NSString(string: filePath).expandingTildeInPath
+        let url = URL(fileURLWithPath: expandedPath).standardizedFileURL
+
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+            sendResponse(id: id, result: ["success": false, "error": "文件不存在: \(filePath)"])
+            return
+        }
+
+        if isDir.boolValue {
+            sendResponse(id: id, result: ["success": false, "error": "路径是一个目录，无法作为 Markdown 打开: \(filePath)"])
+            return
+        }
+
+        // Strict size safety guard: reject files > 50MB
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let fileSize = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+        if fileSize > 50 * 1024 * 1024 {
+            sendResponse(id: id, result: ["success": false, "error": "文件大小为 \(fileSize / (1024 * 1024))MB，超出 50MB 上限"])
+            return
+        }
+
+        // Read strictly in read-only mode
+        guard let rawData = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+            sendResponse(id: id, result: ["success": false, "error": "无法读取文件数据: \(filePath)"])
+            return
+        }
+
+        // Strip UTF-8 BOM if present (0xEF, 0xBB, 0xBF)
+        var contentData = rawData
+        if contentData.count >= 3 && contentData[0] == 0xEF && contentData[1] == 0xBB && contentData[2] == 0xBF {
+            contentData = contentData.subdata(in: 3..<contentData.count)
+        }
+
+        // Decode as UTF-8 with fallback
+        guard var content = String(data: contentData, encoding: .utf8) ??
+                            String(data: contentData, encoding: .unicode) ??
+                            String(data: contentData, encoding: .isoLatin1) else {
+            sendResponse(id: id, result: ["success": false, "error": "文件不是有效的纯文本编码格式"])
+            return
+        }
+
+        // Normalize CRLF -> LF
+        content = content.replacingOccurrences(of: "\r\n", with: "\n")
+
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let stats: [String: Any] = [
+            "size": contentData.count,
+            "mtime": mtime * 1000.0
+        ]
+
+        // Start file watcher for live reload on modification
+        DispatchQueue.main.async { [weak self] in
+            self?.fileWatcher?.watch(filePath: url.path)
+        }
+
+        sendResponse(id: id, result: [
+            "success": true,
+            "content": content,
+            "stats": stats
+        ])
+    }
+
+    private func handleReadFolder(id: String, payload: [String: Any]) {
+        guard let folderPath = payload["folderPath"] as? String, !folderPath.isEmpty else {
+            sendResponse(id: id, result: ["success": false, "error": "无效的文件夹路径"])
+            return
+        }
+
+        let expandedPath = NSString(string: folderPath).expandingTildeInPath
+        let url = URL(fileURLWithPath: expandedPath).standardizedFileURL
+
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
+            sendResponse(id: id, result: ["success": false, "error": "指定的目录不存在"])
+            return
+        }
+
+        let nodes = scanDirectory(url: url, depth: 0, maxDepth: 4)
+        sendResponse(id: id, result: [
+            "success": true,
+            "nodes": nodes
+        ])
+    }
+
+    private func scanDirectory(url: URL, depth: Int, maxDepth: Int) -> [[String: Any]] {
+        guard depth < maxDepth else { return [] }
+
+        let keys: [URLResourceKey] = [.isDirectoryKey, .nameKey]
+        let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles]
+
+        guard let contents = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: options) else {
+            return []
+        }
+
+        var dirNodes: [[String: Any]] = []
+        var fileNodes: [[String: Any]] = []
+
+        for item in contents {
+            let name = item.lastPathComponent
+            // Ignore system/dev folders
+            if name == ".git" || name == "node_modules" || name == "dist" || name == ".DS_Store" || name == "dist-electron" || name == "dist-renderer" {
+                continue
+            }
+
+            guard let res = try? item.resourceValues(forKeys: Set(keys)), let isDir = res.isDirectory else {
+                continue
+            }
+
+            if isDir {
+                let children = scanDirectory(url: item, depth: depth + 1, maxDepth: maxDepth)
+                if !children.isEmpty {
+                    dirNodes.append([
+                        "name": name,
+                        "path": item.path,
+                        "isDirectory": true,
+                        "children": children
+                    ])
+                }
+            } else {
+                let ext = item.pathExtension.lowercased()
+                if ext == "md" || ext == "markdown" {
+                    fileNodes.append([
+                        "name": name,
+                        "path": item.path,
+                        "isDirectory": false
+                    ])
+                }
+            }
+        }
+
+        dirNodes.sort { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+        fileNodes.sort { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+
+        return dirNodes + fileNodes
+    }
+
+    private func handleShowInFolder(id: String, payload: [String: Any]) {
+        guard let filePath = payload["filePath"] as? String, !filePath.isEmpty else {
+            sendResponse(id: id, result: ["success": false])
+            return
+        }
+        let url = URL(fileURLWithPath: filePath)
+        DispatchQueue.main.async {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        }
+        sendResponse(id: id, result: ["success": true])
+    }
+
+    private func handleOpenExternal(id: String, payload: [String: Any]) {
+        guard let urlString = payload["url"] as? String,
+              let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            sendResponse(id: id, result: ["success": false, "error": "仅支持打开 HTTP/HTTPS 安全链接"])
+            return
+        }
+        DispatchQueue.main.async {
+            NSWorkspace.shared.open(url)
+        }
+        sendResponse(id: id, result: ["success": true])
+    }
+
+    // MARK: - Store Handlers
+    private func handleGetSettings(id: String) {
+        let settings = SettingsManager.shared.getSettings()
+        sendResponse(id: id, result: settings)
+    }
+
+    private func handleSaveSettings(id: String, payload: [String: Any]) {
+        SettingsManager.shared.saveSettings(payload)
+        sendResponse(id: id, result: ["success": true])
+    }
+
+    private func handleClearAll(id: String) {
+        SettingsManager.shared.clearAll()
+        sendResponse(id: id, result: ["success": true])
+    }
+
+    // MARK: - Notifications and Responses to JS
+    public func sendResponse(id: String, result: Any?, error: String? = nil) {
+        DispatchQueue.main.async { [weak self] in
+            guard let webView = self?.windowController?.webView else { return }
+
+            let resultJson = toJsonString(result)
+            let errorJson = toJsonString(error)
+            let js = "window.handleNativeResponse(\(quoteJsString(id)), \(resultJson), \(errorJson));"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+
+    public func notifyOpenFile(_ filePath: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let webView = self?.windowController?.webView else { return }
+            let js = "window.handleNativeEvent('app:open-file', \(quoteJsString(filePath)));"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+
+    public func notifyOpenFolder(_ folderPath: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let webView = self?.windowController?.webView else { return }
+            let js = "window.handleNativeEvent('app:open-folder', \(quoteJsString(folderPath)));"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+
+    public func notifyFileChanged(_ filePath: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let webView = self?.windowController?.webView else { return }
+            let js = "window.handleNativeEvent('file:changed', \(quoteJsString(filePath)));"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+
+    public func notifyMenuAction(_ action: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let webView = self?.windowController?.webView else { return }
+            let js = "window.handleNativeEvent('menu:action', \(quoteJsString(action)));"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+}
+
+private func quoteJsString(_ str: String) -> String {
+    if let data = try? JSONSerialization.data(withJSONObject: [str], options: []),
+       let json = String(data: data, encoding: .utf8),
+       json.hasPrefix("[") && json.hasSuffix("]") {
+        return String(json.dropFirst().dropLast())
+    }
+    let escaped = str
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+        .replacingOccurrences(of: "\n", with: "\\n")
+        .replacingOccurrences(of: "\r", with: "\\r")
+    return "\"\(escaped)\""
+}
+
+private func toJsonString(_ obj: Any?) -> String {
+    guard let obj = obj else { return "null" }
+    if let str = obj as? String {
+        return quoteJsString(str)
+    }
+    if let boolVal = obj as? Bool {
+        return boolVal ? "true" : "false"
+    }
+    if let numVal = obj as? NSNumber {
+        return numVal.stringValue
+    }
+    if let data = try? JSONSerialization.data(withJSONObject: obj, options: []),
+       let json = String(data: data, encoding: .utf8) {
+        return json
+    }
+    if let data = try? JSONSerialization.data(withJSONObject: [obj], options: []),
+       let json = String(data: data, encoding: .utf8),
+       json.hasPrefix("[") && json.hasSuffix("]") {
+        return String(json.dropFirst().dropLast())
+    }
+    return "null"
+}

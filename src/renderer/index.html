@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>墨读 MoRead</title>
+  <link rel="stylesheet" href="./styles/main.css">
+  <link rel="stylesheet" href="./styles/markdown.css">
+  <link rel="stylesheet" href="./styles/highlight-theme.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Header & Toolbar -->
+    <header class="app-header">
+      <div class="header-left">
+        <button id="btn-toggle-sidebar" class="btn-icon" title="切换文件侧栏" aria-label="文件侧栏">📁 文件</button>
+        <button id="btn-toggle-outline" class="btn-icon active" title="切换文档大纲" aria-label="文档大纲">📑 大纲</button>
+      </div>
+
+      <div class="header-center">
+        <span id="doc-title" class="doc-title">未打开文件</span>
+        <span id="doc-path" class="doc-path" title=""></span>
+      </div>
+
+      <div class="header-right">
+        <!-- Font Size -->
+        <button id="btn-font-decrease" class="btn-icon" title="缩小字体 (A-)">A-</button>
+        <button id="btn-font-increase" class="btn-icon" title="放大字体 (A+)">A+</button>
+
+        <!-- Reading Width -->
+        <select id="select-reading-width" class="select-native" title="阅读宽度">
+          <option value="compact">紧凑宽 (700px)</option>
+          <option value="standard" selected>标准宽 (860px)</option>
+          <option value="wide">宽松宽 (1100px)</option>
+          <option value="full">全宽度 (100%)</option>
+        </select>
+
+        <!-- Theme -->
+        <select id="select-theme" class="select-native" title="显示主题">
+          <option value="system" selected>跟随系统</option>
+          <option value="light">浅色模式</option>
+          <option value="dark">深色模式</option>
+        </select>
+
+        <!-- Source View Toggle -->
+        <button id="btn-toggle-source" class="btn-icon" title="查看只读源码 (Cmd+Shift+S)">源码</button>
+
+        <!-- Search Button -->
+        <button id="btn-search" class="btn-icon" title="在文档内查找 (Cmd+F)">🔍</button>
+      </div>
+    </header>
+
+    <!-- Workspace -->
+    <div class="app-workspace">
+      <!-- Sidebar -->
+      <aside id="app-sidebar" class="app-sidebar">
+        <div class="sidebar-tabs">
+          <button id="tab-outline" class="sidebar-tab-btn active">大纲目录</button>
+          <button id="tab-files" class="sidebar-tab-btn">文件列表</button>
+        </div>
+        <div id="sidebar-outline-content" class="sidebar-content">
+          <!-- Outline will be injected here -->
+        </div>
+        <div id="sidebar-files-content" class="sidebar-content hidden" style="display: none;">
+          <!-- File tree will be injected here -->
+        </div>
+      </aside>
+
+      <!-- Content Container -->
+      <main id="content-container" class="app-content-container">
+        <!-- Search Bar Floating -->
+        <div id="search-bar" class="search-bar-floating hidden">
+          <input type="text" id="search-input" class="search-input" placeholder="在文档中搜索..." aria-label="搜索框">
+          <span id="search-count" class="search-count">0/0</span>
+          <button id="btn-search-prev" class="btn-icon" title="上一处 (Shift+Enter)">▲</button>
+          <button id="btn-search-next" class="btn-icon" title="下一处 (Enter)">▼</button>
+          <button id="btn-search-close" class="btn-icon" title="关闭 (Esc)">✕</button>
+        </div>
+
+        <!-- Error Banner -->
+        <div id="error-banner" class="error-banner hidden" style="display: none;"></div>
+
+        <!-- Welcome Drop Zone -->
+        <div id="welcome-view" class="welcome-container">
+          <div class="welcome-logo">📖</div>
+          <h1 class="welcome-title">墨读 MoRead</h1>
+          <p class="welcome-desc">专注纯净阅读与学术排版的 macOS Markdown 查看器。支持 LaTeX 复杂公式、语法高亮与文档大纲。</p>
+          <div class="welcome-actions">
+            <button id="btn-welcome-open-file" class="btn-primary">打开 Markdown 文件...</button>
+            <button id="btn-welcome-open-folder" class="btn-secondary">打开文件夹...</button>
+          </div>
+          <div id="recent-container" class="recent-list-container">
+            <div class="recent-header">
+              <span>最近打开的文档</span>
+              <button id="btn-clear-recent" class="btn-icon" style="font-size: 11px;">清空记录</button>
+            </div>
+            <ul id="recent-list" class="recent-list">
+              <!-- Recent items injected here -->
+            </ul>
+          </div>
+        </div>
+
+        <!-- Rendered Markdown Body -->
+        <div id="markdown-scroll-wrapper" class="markdown-scroll-wrapper hidden" style="display: none;">
+          <div id="markdown-body-wrapper" class="markdown-body-wrapper width-standard">
+            <article id="markdown-body" class="markdown-body"></article>
+          </div>
+        </div>
+
+        <!-- Source View (Read-only) -->
+        <div id="source-view" class="source-view-container hidden" style="display: none;">
+          <textarea id="source-textarea" class="source-textarea" readonly spellcheck="false" placeholder="只读源码..."></textarea>
+        </div>
+      </main>
+    </div>
+
+    <!-- Status Bar -->
+    <footer class="app-status-bar">
+      <div class="status-left">
+        <span id="status-readonly-badge" style="color: var(--accent-color); font-weight: 600;">[只读模式]</span>
+        <span id="status-encoding">UTF-8</span>
+        <span id="status-file-size">-</span>
+      </div>
+      <div class="status-right">
+        <span id="status-stats">0 字 · 0 行</span>
+        <span>MoRead v1.0.0</span>
+      </div>
+    </footer>
+  </div>
+
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>
