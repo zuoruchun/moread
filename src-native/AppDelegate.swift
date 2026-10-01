@@ -99,6 +99,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(openFolderItem)
 
         fileMenu.addItem(NSMenuItem.separator())
+        let saveItem = NSMenuItem(title: "存储", action: #selector(menuSaveFile), keyEquivalent: "s")
+        saveItem.target = self
+        fileMenu.addItem(saveItem)
+
+        fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         fileMenuItem.submenu = fileMenu
         mainMenu.addItem(fileMenuItem)
@@ -173,6 +178,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func menuOpenFolder() {
         mainWindowController?.showOpenFolderDialog()
+    }
+
+    @objc private func menuSaveFile() {
+        mainWindowController?.saveDocument()
     }
 
     @objc private func menuSearch() {

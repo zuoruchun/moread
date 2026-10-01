@@ -40,6 +40,14 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.handleReadFile(id: id, payload: payload)
             }
+        case "fs:write-file":
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.handleWriteFile(id: id, payload: payload)
+            }
+        case "window:set-edited":
+            handleSetWindowEdited(id: id, payload: payload)
+        case "dialog:confirm-save":
+            handleConfirmSaveDialog(id: id, payload: payload)
         case "fs:read-folder":
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.handleReadFolder(id: id, payload: payload)
@@ -52,6 +60,11 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
             handleGetSettings(id: id)
         case "store:save-settings":
             handleSaveSettings(id: id, payload: payload)
+        case "window:close":
+            DispatchQueue.main.async { [weak self] in
+                self?.windowController?.forceCloseWindow()
+            }
+            sendResponse(id: id, result: ["success": true])
         case "store:clear-all":
             handleClearAll(id: id)
         default:
@@ -185,6 +198,93 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
             "content": content,
             "stats": stats
         ])
+    }
+
+    private func handleWriteFile(id: String, payload: [String: Any]) {
+        guard let filePath = payload["filePath"] as? String, !filePath.isEmpty,
+              let content = payload["content"] as? String else {
+            sendResponse(id: id, result: ["success": false, "error": "无效的文件路径或内容"])
+            return
+        }
+
+        let expandedPath = NSString(string: filePath).expandingTildeInPath
+        let url = URL(fileURLWithPath: expandedPath).standardizedFileURL
+        let ext = url.pathExtension.lowercased()
+
+        guard ext == "md" || ext == "markdown" else {
+            sendResponse(id: id, result: ["success": false, "error": "仅支持写入 Markdown 文件"])
+            return
+        }
+
+        guard isAuthorized(url.path) else {
+            sendResponse(id: id, result: ["success": false, "error": "文件不在用户已授权的目录中"])
+            return
+        }
+
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+            sendResponse(id: id, result: ["success": false, "error": "目标路径是一个目录，无法写入"])
+            return
+        }
+
+        guard let data = content.data(using: .utf8) else {
+            sendResponse(id: id, result: ["success": false, "error": "编码转换失败"])
+            return
+        }
+
+        // Suppress watcher before writing to prevent self-reload loop
+        self.fileWatcher?.suppressNextChange(for: url.path, duration: 1.5)
+
+        do {
+            try data.write(to: url, options: .atomic)
+            let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            sendResponse(id: id, result: [
+                "success": true,
+                "stats": [
+                    "size": data.count,
+                    "mtime": mtime * 1000.0
+                ]
+            ])
+        } catch {
+            sendResponse(id: id, result: ["success": false, "error": "写入文件失败: \(error.localizedDescription)"])
+        }
+    }
+
+    private func handleSetWindowEdited(id: String, payload: [String: Any]) {
+        let isEdited = payload["isEdited"] as? Bool ?? false
+        DispatchQueue.main.async { [weak self] in
+            self?.windowController?.window?.isDocumentEdited = isEdited
+            self?.sendResponse(id: id, result: ["success": true])
+        }
+    }
+
+    private func handleConfirmSaveDialog(id: String, payload: [String: Any]) {
+        let fileName = payload["fileName"] as? String ?? "当前文档"
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let window = self.windowController?.window else {
+                self?.sendResponse(id: id, result: ["action": "dont-save"])
+                return
+            }
+            let alert = NSAlert()
+            alert.messageText = "是否存储对文档“\(fileName)”所做的更改？"
+            alert.informativeText = "如果不存储，您所做的更改将会丢失。"
+            alert.addButton(withTitle: "存储")
+            alert.addButton(withTitle: "取消")
+            alert.addButton(withTitle: "不存储")
+            alert.alertStyle = .warning
+
+            alert.beginSheetModal(for: window) { response in
+                switch response {
+                case .alertFirstButtonReturn:
+                    self.sendResponse(id: id, result: ["action": "save"])
+                case .alertSecondButtonReturn:
+                    self.sendResponse(id: id, result: ["action": "cancel"])
+                default:
+                    self.sendResponse(id: id, result: ["action": "dont-save"])
+                }
+            }
+        }
     }
 
     private func handleReadFolder(id: String, payload: [String: Any]) {

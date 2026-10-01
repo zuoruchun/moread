@@ -245,6 +245,28 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
         webView.pageZoom = 1.0
     }
 
+    public func saveDocument() {
+        nativeBridge.notifyMenuAction("save")
+    }
+
+    public func toggleSourceMode() {
+        nativeBridge.notifyMenuAction("toggle-source")
+    }
+
+    public func forceCloseWindow() {
+        window?.isDocumentEdited = false
+        window?.close()
+    }
+
+    // MARK: - NSWindowDelegate
+    public func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender.isDocumentEdited {
+            nativeBridge.notifyMenuAction("request-close")
+            return false
+        }
+        return true
+    }
+
     // MARK: - WKNavigationDelegate
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         isWebContentLoaded = true

@@ -119,4 +119,31 @@ describe('Native WebKit Bridge', () => {
     window.handleNativeEvent!('menu:action', 'toggle-outline');
     expect(menuActionCb).toHaveBeenCalledWith('toggle-outline');
   });
+
+  it('sends fs:write-file, window:set-edited, and dialog:confirm-save actions', async () => {
+    const writePromise = window.electronAPI.writeFile('/test.md', '# New Content');
+    expect(mockPostMessage).toHaveBeenCalledTimes(1);
+    const writeCall = mockPostMessage.mock.calls[0][0];
+    expect(writeCall.action).toBe('fs:write-file');
+    expect(writeCall.payload.filePath).toBe('/test.md');
+    expect(writeCall.payload.content).toBe('# New Content');
+    window.handleNativeResponse!(writeCall.id, { success: true, stats: { size: 13, mtime: 2000 } });
+    const writeRes = await writePromise;
+    expect(writeRes.success).toBe(true);
+
+    const editedPromise = window.electronAPI.setDocumentEdited(true);
+    const editedCall = mockPostMessage.mock.calls[1][0];
+    expect(editedCall.action).toBe('window:set-edited');
+    expect(editedCall.payload.isEdited).toBe(true);
+    window.handleNativeResponse!(editedCall.id, { success: true });
+    await editedPromise;
+
+    const confirmPromise = window.electronAPI.confirmSaveDialog('test.md');
+    const confirmCall = mockPostMessage.mock.calls[2][0];
+    expect(confirmCall.action).toBe('dialog:confirm-save');
+    expect(confirmCall.payload.fileName).toBe('test.md');
+    window.handleNativeResponse!(confirmCall.id, { action: 'save' });
+    const confirmRes = await confirmPromise;
+    expect(confirmRes.action).toBe('save');
+  });
 });

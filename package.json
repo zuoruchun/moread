@@ -1,6 +1,6 @@
 {
   "name": "moread",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "墨读 MoRead - 个人自用 macOS Markdown 阅读器 (Swift/AppKit + WKWebView)",
   "author": "Ruchun Zuo",
   "scripts": {
@@ -14,12 +14,15 @@
     "dompurify": "^3.1.6",
     "highlight.js": "^11.10.0",
     "markdown-it": "^14.1.0",
-    "mathjax-full": "^3.2.2"
+    "mathjax-full": "^3.2.2",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2"
   },
   "devDependencies": {
     "@types/dompurify": "^3.0.5",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^20.16.5",
+    "@types/turndown": "^5.0.6",
     "typescript": "^5.6.2",
     "vite": "^5.4.6",
     "vitest": "^2.1.1"

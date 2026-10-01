@@ -29,7 +29,7 @@ export function highlightCode(code: string, lang: string): string {
 
   return `
 <div class="code-block-container">
-  <div class="code-block-header">
+  <div class="code-block-header" contenteditable="false">
     <span class="code-lang">${escapeHtml(displayLang)}</span>
     <button class="code-copy-btn" data-code="${encodedRawCode}" title="复制全部代码" aria-label="复制代码">复制</button>
   </div>

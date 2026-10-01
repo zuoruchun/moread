@@ -503,6 +503,47 @@ html, body {
   gap: 12px;
 }
 
+/* Status Mode & Save Badges */
+.status-mode-btn {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-color);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.status-mode-btn:hover {
+  background-color: var(--accent-subtle);
+}
+
+.status-save-badge {
+  font-weight: 600;
+  font-size: 11px;
+  border-radius: 4px;
+  padding: 1px 4px;
+  transition: opacity 0.2s ease;
+}
+
+.status-save-badge.unsaved {
+  color: #d97706;
+}
+
+[data-theme="dark"] .status-save-badge.unsaved {
+  color: #fbbf24;
+}
+
+.status-save-badge.saved {
+  color: #059669;
+}
+
+[data-theme="dark"] .status-save-badge.saved {
+  color: #34d399;
+}
+
 /* Error message banner */
 .error-banner {
   background-color: #ffebe9;

@@ -8,6 +8,8 @@ public final class FileWatcher: @unchecked Sendable {
     private var currentFilePath: String?
     private let onChange: (String) -> Void
     private var isStopped = false
+    private var suppressedPath: String?
+    private var suppressedUntil: Date?
 
     public init(onChange: @escaping (String) -> Void) {
         self.onChange = onChange
@@ -15,6 +17,13 @@ public final class FileWatcher: @unchecked Sendable {
 
     deinit {
         stop()
+    }
+
+    public func suppressNextChange(for path: String, duration: TimeInterval = 1.5) {
+        queue.async { [weak self] in
+            self?.suppressedPath = path
+            self?.suppressedUntil = Date().addingTimeInterval(duration)
+        }
     }
 
     public func watch(filePath: String) {
@@ -82,6 +91,13 @@ public final class FileWatcher: @unchecked Sendable {
         debounceWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self, !self.isStopped else { return }
+            if let suppressed = self.suppressedPath,
+               let until = self.suppressedUntil,
+               suppressed == path,
+               Date() < until {
+                // Suppress notification triggered by app's own save
+                return
+            }
             DispatchQueue.main.async {
                 self.onChange(path)
             }

@@ -298,6 +298,44 @@ struct TestRunner {
         assertTrue(allHashesMatch, "All \(initialHashes.count) test fixtures have 100% identical SHA-256 hashes (Strictly Read-Only Guarantee)")
 
         // ----------------------------------------------------
+        // Test 12: File Writing & Atomic Save & Suppression
+        // ----------------------------------------------------
+        print("\n[Group 8: File Writing & Self-Reload Suppression]")
+        do {
+            let tempDir = FileManager.default.temporaryDirectory
+            let testSaveFile = tempDir.appendingPathComponent("moread_save_test_\(UUID().uuidString).md")
+            let initialContent = "# Initial Content\n"
+            try initialContent.write(to: testSaveFile, atomically: true, encoding: .utf8)
+
+            var watcherTriggered = false
+            let saveWatcher = FileWatcher { _ in watcherTriggered = true }
+            saveWatcher.watch(filePath: testSaveFile.path)
+            Thread.sleep(forTimeInterval: 0.1)
+
+            // Test atomic write with suppression
+            saveWatcher.suppressNextChange(for: testSaveFile.path, duration: 1.0)
+            let updatedContent = "# Updated WYSIWYG Content\n\n- [x] Item 1\n"
+            let data = updatedContent.data(using: .utf8)!
+            try data.write(to: testSaveFile, options: .atomic)
+
+            // Wait to verify suppression prevented notification
+            let waitDeadline = Date(timeIntervalSinceNow: 0.5)
+            while Date() < waitDeadline {
+                RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.05))
+            }
+            assertTrue(!watcherTriggered, "suppressNextChange correctly suppressed notification during save")
+
+            // Verify content on disk
+            let readBack = try String(contentsOf: testSaveFile, encoding: .utf8)
+            assertEqual(readBack, updatedContent, "Saved markdown content matches exact atomic write")
+
+            saveWatcher.stop()
+            try? FileManager.default.removeItem(at: testSaveFile)
+        } catch {
+            assertTrue(false, "Save & suppression test failed: \(error)")
+        }
+
+        // ----------------------------------------------------
         // Summary
         // ----------------------------------------------------
         print("\n==========================================")

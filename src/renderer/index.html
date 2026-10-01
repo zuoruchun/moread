@@ -43,7 +43,7 @@
         </select>
 
         <!-- Source View Toggle -->
-        <button id="btn-toggle-source" class="btn-icon" title="查看只读源码 (Cmd+Shift+S)">源码</button>
+        <button id="btn-toggle-source" class="btn-icon" title="切换编辑模式 (Cmd+Shift+S)">源码</button>
 
         <!-- Search Button -->
         <button id="btn-search" class="btn-icon" title="在文档内查找 (Cmd+F)">🔍</button>
@@ -103,13 +103,13 @@
         <!-- Rendered Markdown Body -->
         <div id="markdown-scroll-wrapper" class="markdown-scroll-wrapper hidden" style="display: none;">
           <div id="markdown-body-wrapper" class="markdown-body-wrapper width-standard">
-            <article id="markdown-body" class="markdown-body"></article>
+            <article id="markdown-body" class="markdown-body" contenteditable="true" spellcheck="false"></article>
           </div>
         </div>
 
-        <!-- Source View (Read-only) -->
+        <!-- Source View (Writable) -->
         <div id="source-view" class="source-view-container hidden" style="display: none;">
-          <textarea id="source-textarea" class="source-textarea" readonly spellcheck="false" placeholder="只读源码..."></textarea>
+          <textarea id="source-textarea" class="source-textarea" spellcheck="false" placeholder="输入 Markdown 源码..."></textarea>
         </div>
       </main>
     </div>
@@ -117,13 +117,14 @@
     <!-- Status Bar -->
     <footer class="app-status-bar">
       <div class="status-left">
-        <span id="status-readonly-badge" style="color: var(--accent-color); font-weight: 600;">[只读模式]</span>
+        <button id="status-mode-btn" class="status-mode-btn" title="点击切换编辑模式 (Cmd+Shift+S)">[所见即所得]</button>
+        <span id="status-save-badge" class="status-save-badge" style="display: none;">[已保存]</span>
         <span id="status-encoding">UTF-8</span>
         <span id="status-file-size">-</span>
       </div>
       <div class="status-right">
-        <span id="status-stats">0 字 · 0 行</span>
-        <span>MoRead v1.1.0</span>
+        <span id="status-stats">0 字符 · 0 行</span>
+        <span>MoRead v1.2.0</span>
       </div>
     </footer>
   </div>

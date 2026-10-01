@@ -6,6 +6,7 @@ import { highlightCode, escapeHtml } from './highlight.ts';
 export interface ParseOptions {
   currentFilePath?: string;
   allowRemoteImages?: boolean;
+  readonly?: boolean;
 }
 
 export interface HeadingItem {
@@ -107,6 +108,9 @@ export function sanitizeHtml(rawHtml: string): string {
         'data-mml-node',
         'data-mjx-texclass',
         'data-code',
+        'data-raw-formula',
+        'contenteditable',
+        'style',
         'disabled',
         'checked',
         'target',
@@ -172,9 +176,11 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
     return self.renderToken(tokens, idx, renderOpts);
   };
 
-  // 6. Support read-only task list rendering
-  protectedContent = protectedContent.replace(/^(\s*[-*+]\s+)\[ \]\s+/gm, '$1<input type="checkbox" disabled class="task-list-item-checkbox"> ');
-  protectedContent = protectedContent.replace(/^(\s*[-*+]\s+)\[[xX]\]\s+/gm, '$1<input type="checkbox" disabled checked class="task-list-item-checkbox"> ');
+  // 6. Support task list rendering (readonly by default, interactive when readonly: false)
+  const isReadonly = options.readonly ?? true;
+  const disabledAttr = isReadonly ? 'disabled ' : '';
+  protectedContent = protectedContent.replace(/^(\s*[-*+]\s+)\[ \]\s+/gm, `$1<input type="checkbox" ${disabledAttr}class="task-list-item-checkbox"> `);
+  protectedContent = protectedContent.replace(/^(\s*[-*+]\s+)\[[xX]\]\s+/gm, `$1<input type="checkbox" ${disabledAttr}checked class="task-list-item-checkbox"> `);
 
   // 7. Parse with Markdown-it
   let renderedHtml = md.render(protectedContent);
@@ -186,9 +192,9 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
     const idx = parseInt(idxStr, 10);
     const formula = displayMathList[idx];
     if (idx >= MAX_MATH_COUNT) {
-      return `<div class="math-block-wrapper math-quota-exceeded" title="为保证界面响应速度，超出${MAX_MATH_COUNT}个公式的部分安全降级为源码"><code class="hljs language-latex">$$\n${escapeHtml(formula)}\n$$</code></div>`;
+      return `<div class="math-block-wrapper math-quota-exceeded" data-raw-formula="${escapeHtml(formula)}" contenteditable="false" title="超出公式上限"><code class="hljs language-latex">$$\n${escapeHtml(formula)}\n$$</code></div>`;
     }
-    return `<div class="math-block-wrapper">${renderMath(formula, true)}</div>`;
+    return `<div class="math-block-wrapper" data-raw-formula="${escapeHtml(formula)}" contenteditable="false"><span class="raw-math-marker" style="display:none;">${escapeHtml(formula)}</span>${renderMath(formula, true)}</div>`;
   });
 
   // 9. Replace Inline Math placeholders with MathJax SVG (with quota protection)
@@ -196,9 +202,9 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
     const idx = parseInt(idxStr, 10);
     const formula = inlineMathList[idx];
     if (idx >= MAX_MATH_COUNT) {
-      return `<code class="math-inline-fallback" title="超出公式渲染上限，安全降级">$${escapeHtml(formula)}$</code>`;
+      return `<code class="math-inline-fallback" data-raw-formula="${escapeHtml(formula)}" contenteditable="false" title="超出公式渲染上限">$${escapeHtml(formula)}$</code>`;
     }
-    return renderMath(formula, false);
+    return `<span class="math-inline-wrapper" data-raw-formula="${escapeHtml(formula)}" contenteditable="false"><span class="raw-math-marker" style="display:none;">${escapeHtml(formula)}</span>${renderMath(formula, false)}</span>`;
   });
 
   // 10. Handle Relative Images and URL Safety

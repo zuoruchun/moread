@@ -4,6 +4,9 @@
   line-height: 1.75;
   color: var(--text-primary);
   word-wrap: break-word;
+  min-height: calc(100vh - 120px);
+  outline: none;
+  caret-color: var(--accent-color);
 }
 
 /* Headings */
@@ -95,7 +98,7 @@
 .task-list-item-checkbox {
   margin-right: 8px;
   vertical-align: middle;
-  cursor: default;
+  cursor: pointer;
 }
 
 /* Tables */
