@@ -151,6 +151,7 @@ html, body {
 
 /* Sidebar */
 .app-sidebar {
+  flex-shrink: 0;
   width: 260px;
   min-width: 180px;
   max-width: 400px;
@@ -164,7 +165,26 @@ html, body {
 
 .app-sidebar.collapsed {
   margin-left: -260px;
+  visibility: hidden;
 }
+
+.settings-dialog {
+  width: min(360px, calc(100vw - 48px));
+  margin: auto;
+  padding: 22px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.2);
+}
+
+.settings-dialog::backdrop { background: rgba(0, 0, 0, 0.25); }
+.settings-heading, .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.settings-heading { margin-bottom: 20px; }
+.settings-heading h2 { font-size: 17px; }
+.settings-row { margin: 16px 0; font-size: 13px; }
+#settings-font-size { width: 64px; }
 
 .sidebar-tabs {
   display: flex;
@@ -259,6 +279,7 @@ html, body {
 }
 
 .tree-label {
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -504,7 +525,7 @@ html, body {
 }
 
 /* Status Mode & Save Badges */
-.status-mode-btn {
+.status-mode {
   background: transparent;
   border: none;
   padding: 2px 4px;
@@ -512,12 +533,6 @@ html, body {
   font-weight: 600;
   color: var(--accent-color);
   border-radius: 4px;
-  cursor: pointer;
-  transition: background-color 0.15s ease;
-}
-
-.status-mode-btn:hover {
-  background-color: var(--accent-subtle);
 }
 
 .status-save-badge {
@@ -572,12 +587,6 @@ html, body {
     gap: 4px;
   }
   .header-center {
-    display: none;
-  }
-  #select-reading-width {
-    display: none;
-  }
-  #btn-font-increase, #btn-font-decrease {
     display: none;
   }
   .markdown-scroll-wrapper {

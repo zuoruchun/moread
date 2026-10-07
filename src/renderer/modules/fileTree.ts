@@ -18,6 +18,9 @@ export class FileTreeController {
   public update(nodes: FileNode[], currentPath: string | null = null): void {
     this.currentFilePath = currentPath;
     this.container.innerHTML = '';
+    if (currentPath && !this.containsFile(nodes, currentPath)) {
+      nodes = [...nodes, { name: currentPath.split('/').pop()!, path: currentPath, isDirectory: false }];
+    }
 
     if (!nodes || nodes.length === 0) {
       this.container.innerHTML = '<div class="file-tree-empty">目录下无 Markdown 文件</div>';
@@ -39,6 +42,10 @@ export class FileTreeController {
         el.classList.remove('active');
       }
     });
+  }
+
+  private containsFile(nodes: FileNode[], path: string): boolean {
+    return nodes.some(node => node.path === path || this.containsFile(node.children || [], path));
   }
 
   private renderNodes(nodes: FileNode[]): HTMLElement {
@@ -71,8 +78,13 @@ export class FileTreeController {
       li.appendChild(row);
 
       if (node.isDirectory) {
-        let isExpanded = false;
+        let isExpanded = this.currentFilePath !== null && this.containsFile(node.children || [], this.currentFilePath);
         let subUl: HTMLElement | null = null;
+        if (isExpanded && node.children) {
+          icon.textContent = '📂 ';
+          subUl = this.renderNodes(node.children);
+          li.appendChild(subUl);
+        }
 
         row.addEventListener('click', () => {
           isExpanded = !isExpanded;
@@ -91,7 +103,6 @@ export class FileTreeController {
       } else {
         row.addEventListener('click', () => {
           this.onSelectFile(node.path);
-          this.setCurrentFile(node.path);
         });
       }
 

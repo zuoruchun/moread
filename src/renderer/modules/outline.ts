@@ -14,6 +14,7 @@ export class OutlineController {
 
   public update(headings: HeadingItem[]): void {
     this.headings = headings;
+    this.activeId = null;
     this.render();
     this.setupIntersectionObserver();
   }

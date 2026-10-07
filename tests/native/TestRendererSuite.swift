@@ -1,0 +1,308 @@
+import Cocoa
+import WebKit
+
+#if MOREAD_BRIDGE_INTEGRATION
+// A minimal host for the production filesystem bridge, without application settings/dialogs.
+public final class MainWindowController: @unchecked Sendable {
+    public var webView: WKWebView!
+    public var window: NSWindow?
+    public func rendererDidBecomeReady() {}
+    public func beginWindowDrag() {}
+    public func forceCloseWindow() {}
+    public func allowLocalResources(forDocument path: String) {}
+}
+#endif
+
+// Runs the production renderer in WKWebView with an isolated native bridge.
+// File operations use temporary fixtures; settings stay in memory.
+@MainActor
+final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
+    var window: NSWindow!
+    var webView: WKWebView!
+    var settings: [String: Any] = ["theme": "system", "fontSize": 16, "showSidebar": false, "recentFiles": []]
+    let fixtures = FileManager.default.temporaryDirectory.appendingPathComponent("moread-renderer-\(UUID().uuidString)")
+    var completed = false
+    var phase = 0
+    var timer: Timer?
+    var passedChecks = 0
+#if MOREAD_BRIDGE_INTEGRATION
+    let productionBridge = NativeBridge()
+    let productionHost = MainWindowController()
+#endif
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        do {
+            try FileManager.default.createDirectory(at: fixtures, withIntermediateDirectories: true)
+            try "# 1\\. **第一节**\n\n正文\n\n## 2\\. 第二节\n\n## 3\\. 第三节".write(to: fixtures.appendingPathComponent("未命名.md"), atomically: true, encoding: .utf8)
+            try FileManager.default.createDirectory(at: fixtures.appendingPathComponent("nested"), withIntermediateDirectories: true)
+            try "# 子目录".write(to: fixtures.appendingPathComponent("nested/另一个.md"), atomically: true, encoding: .utf8)
+            try #"""
+            # 代码编辑测试
+
+            ```bash
+            qwen-start \
+              --gpu 1 \
+              --max-model-len 98304 \
+              --gpu-memory-utilization 0.90
+            ```
+
+            ```python
+            print("second block")
+            ```
+
+            ```not-a-language
+            <script>window.__codeExecuted = true</script>
+            ```
+            """#.write(to: fixtures.appendingPathComponent("代码.md"), atomically: true, encoding: .utf8)
+        } catch { finish(false, "Fixture setup: \(error)"); return }
+        let config = WKWebViewConfiguration()
+        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        config.userContentController.add(self, name: "nativeAPI")
+        config.userContentController.add(self, name: "testResult")
+        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 500, height: 720), configuration: config)
+        window = NSWindow(contentRect: webView.frame, styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentView = webView
+        window.title = "MoRead Renderer Regression"
+        window.makeKeyAndOrderFront(nil)
+#if MOREAD_BRIDGE_INTEGRATION
+        productionHost.webView = webView
+        productionHost.window = window
+        productionBridge.windowController = productionHost
+        productionBridge.authorizeDirectory(fixtures.path)
+#endif
+        let url = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("index.html")
+        webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.poll() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45) { [weak self] in
+            if self?.completed == false { self?.finish(false, "Timed out") }
+        }
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "testResult", let body = message.body as? [String: Any] {
+            finish(body["success"] as? Bool ?? false, body["detail"] as? String ?? "No detail")
+            return
+        }
+        guard let body = message.body as? [String: Any], let id = body["id"] as? String, let action = body["action"] as? String else { return }
+        let payload = body["payload"] as? [String: Any] ?? [:]
+#if MOREAD_BRIDGE_INTEGRATION
+        if ["fs:read-file", "fs:read-folder", "fs:write-file"].contains(action) {
+            let path = payload["filePath"] as? String ?? payload["folderPath"] as? String ?? ""
+            guard URL(fileURLWithPath: path).standardized.path.hasPrefix(fixtures.path) else {
+                finish(false, "Production bridge attempted access outside isolated fixtures"); return
+            }
+            productionBridge.userContentController(userContentController, didReceive: message)
+            return
+        }
+#endif
+        if action == "test:reload" {
+            passedChecks = payload["checks"] as? Int ?? 0
+            phase = 2
+            webView.reload()
+            return
+        }
+        var result: Any = ["success": true]
+        switch action {
+        case "store:get-settings": result = settings
+        case "store:save-settings": settings.merge(payload) { _, value in value }
+        case "fs:read-file":
+            let path = payload["filePath"] as? String ?? ""
+            if let content = try? String(contentsOfFile: path, encoding: .utf8) {
+                result = ["success": true, "content": content, "stats": ["size": content.utf8.count]]
+            } else { result = ["success": false, "error": "File missing"] }
+        case "fs:read-folder":
+            let path = payload["folderPath"] as? String ?? ""
+            result = ["success": true, "nodes": scan(URL(fileURLWithPath: path))]
+        case "fs:write-file":
+            let path = payload["filePath"] as? String ?? ""
+            let content = payload["content"] as? String ?? ""
+            guard URL(fileURLWithPath: path).standardized.path.hasPrefix(fixtures.path + "/") else {
+                finish(false, "Attempted to write outside isolated fixtures"); return
+            }
+            do {
+                try content.write(toFile: path, atomically: true, encoding: .utf8)
+                result = ["success": true, "stats": ["size": content.utf8.count]]
+            } catch { result = ["success": false, "error": String(describing: error)] }
+        case "dialog:confirm-save": result = ["action": "dont-save"]
+        default: break
+        }
+        let values = try! JSONSerialization.data(withJSONObject: [id, result], options: [.fragmentsAllowed])
+        let json = String(data: values, encoding: .utf8)!
+        webView.evaluateJavaScript("window.handleNativeResponse(...\(json))")
+    }
+
+    func scan(_ url: URL) -> [[String: Any]] {
+        let entries = (try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        return entries.compactMap { entry in
+            let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            if isDir { return ["name": entry.lastPathComponent, "path": entry.path, "isDirectory": true, "children": scan(entry)] }
+            guard entry.pathExtension.lowercased() == "md" else { return nil }
+            return ["name": entry.lastPathComponent, "path": entry.path, "isDirectory": false]
+        }
+    }
+
+    func poll() {
+        guard !completed, phase != 1, phase != 3 else { return }
+        let readiness = phase == 2 ? "Boolean(window.moreadApp && window.moreadApp.currentSettings.theme && !window.__rendererTestInitial)" : "Boolean(window.moreadApp && window.moreadApp.currentSettings.theme)"
+        webView.evaluateJavaScript(readiness) { [weak self] result, _ in
+            guard let self, result as? Bool == true else { return }
+            if self.phase == 0 {
+                self.phase = 1
+                self.runInteractions()
+            } else if self.phase == 2 {
+                self.phase = 3
+                self.webView.evaluateJavaScript("""
+                (() => {
+                  const a = window.moreadApp;
+                  const ok = a.currentSettings.theme === 'dark' && a.settingsFontSizeEl.value === '20' && a.selectWidthEl.value === 'wide' && a.filesTabBtn.classList.contains('active') && a.btnToggleSidebarEl.getAttribute('aria-expanded') === 'true';
+                  window.webkit.messageHandlers.testResult.postMessage({success: ok, detail: ok ? 'PASS: \(passedChecks + 1) renderer checks, including code editing/copy/save/undo and reload persistence' : 'Settings/sidebar persistence failed'});
+                })()
+                """)
+            }
+        }
+    }
+
+    func runInteractions() {
+        let fixtureJSON = String(data: try! JSONSerialization.data(withJSONObject: [fixtures.path]), encoding: .utf8)!
+        webView.evaluateJavaScript("""
+        void (async () => {
+          try {
+            const root = \(fixtureJSON)[0], a = window.moreadApp;
+            window.__rendererTestInitial = true;
+            let checks = 0;
+            const check = (ok, message) => { if (!ok) throw new Error(message); checks++; };
+            const click = id => document.getElementById(id).click();
+            check(document.querySelectorAll('.header-left button').length === 1, 'One sidebar button');
+            check(document.querySelectorAll('.header-right button').length === 2 && !document.querySelector('.header-right select') && !document.getElementById('btn-settings') && !document.getElementById('btn-font-increase') && !document.querySelector('.status-left button'), 'Toolbar cleanup');
+            await a.loadFile(root + '/未命名.md');
+            check(a.docTitleEl.textContent === '未命名.md' && a.filesContentEl.textContent.includes('未命名.md'), 'Standalone file list');
+            click('btn-toggle-sidebar'); click('tab-files'); click('btn-toggle-sidebar'); click('btn-toggle-sidebar');
+            check(a.filesTabBtn.classList.contains('active') && a.btnToggleSidebarEl.getAttribute('aria-expanded') === 'true', 'Tab survives collapse');
+            click('tab-outline');
+            check([...document.querySelectorAll('.outline-link')].map(x => x.textContent).join('|') === '1. 第一节|2. 第二节|3. 第三节', 'Visible numbered outline');
+            check([...document.querySelectorAll('.outline-link')].every(x => document.getElementById(x.getAttribute('href').slice(1))), 'Heading anchors');
+            click('btn-toggle-source'); click('btn-toggle-source');
+            check(!a.outlineContentEl.textContent.includes('\\\\'), 'Roundtrip outline escapes');
+            const api = window.electronAPI, readFolder = api.readFolder;
+            let release; api.readFolder = () => new Promise(resolve => { release = resolve; });
+            const stale = a.loadFile(root + '/未命名.md');
+            while (!release) await new Promise(r => setTimeout(r, 10));
+            api.readFolder = readFolder;
+            await a.loadFile(root + '/nested/另一个.md');
+            release({success:true,nodes:[]}); await stale;
+            check(a.filesContentEl.textContent.includes('另一个.md'), 'Stale folder result ignored');
+            api.readFolder = async () => ({success:false,error:'Denied'});
+            await a.loadFile(root + '/未命名.md');
+            check(a.filesContentEl.textContent.includes('未命名.md') && a.filesContentEl.textContent.includes('无法读取文件夹'), 'Folder failure retains file');
+            api.readFolder = readFolder;
+            await a.loadFolderTree(root); await a.loadFile(root + '/nested/另一个.md');
+            check(a.filesContentEl.textContent.includes('未命名.md') && a.filesContentEl.textContent.includes('另一个.md'), 'Nested file keeps folder root and expands');
+            await a.loadFile(root + '/代码.md');
+            const blocks = [...a.markdownBodyEl.querySelectorAll('.code-block-container')];
+            check(blocks.length === 3 && blocks.every(b => b.querySelector('input.code-lang') && b.querySelector('textarea.code-editor')), 'Editable code controls survive DOMPurify');
+            let code = blocks[0].querySelector('pre code'), language = blocks[0].querySelector('input.code-lang');
+            let editor = blocks[0].querySelector('textarea.code-editor');
+            editor.scrollIntoView({block:'center'});
+            const editorRect = editor.getBoundingClientRect();
+            check(document.elementFromPoint(editorRect.left + 20, editorRect.top + 20) === editor, 'Mouse clicks hit the code editor instead of the parent article');
+            const initialCode = editor.value;
+            const liveCode = () => editor.value;
+            check(code.querySelector('.hljs-title')?.textContent === 'qwen-start' && code.querySelector('.hljs-attr')?.textContent === '--gpu' && code.querySelector('.hljs-number'), 'Bash CLI highlighting');
+            check(getComputedStyle(code.querySelector('.hljs-title')).color !== getComputedStyle(code).color && getComputedStyle(code.querySelector('.hljs-number')).color !== getComputedStyle(code).color, 'Highlight colors differ from plain text');
+            check(!blocks[2].querySelector('script') && !window.__codeExecuted, 'Unknown language escapes script');
+            const selectCode = () => {
+              editor.focus(); editor.select();
+            };
+            selectCode();
+            const editedCode = 'def hello():\\n    return "中文"\\n\\n';
+            document.execCommand('insertText', false, editedCode);
+            check(a.isEdited && liveCode() === editedCode, 'Multiline code editing preserves indentation and trailing blank lines: ' + JSON.stringify({edited:a.isEdited,text:liveCode(),html:code.innerHTML}));
+            document.execCommand('undo');
+            check(liveCode() === initialCode, 'Native undo during code editing');
+            document.execCommand('redo');
+            check(liveCode() === editedCode, 'Native redo during code editing');
+            const caretBeforeLanguage = editor.selectionStart;
+            editor.dispatchEvent(new CompositionEvent('compositionstart', {bubbles:true,data:'中'}));
+            editor.value = editedCode; editor.dispatchEvent(new InputEvent('input', {bubbles:true,isComposing:true,data:'中'}));
+            editor.dispatchEvent(new CompositionEvent('compositionend', {bubbles:true,data:'中'}));
+            check(editor.value === editedCode && editor.selectionStart === caretBeforeLanguage, 'Composition events do not reset code value or caret');
+            language.focus(); language.value = 'py'; language.dispatchEvent(new Event('input', {bubbles:true}));
+            check(editor.value === editedCode && code.querySelector('.hljs-keyword')?.textContent === 'def', 'Rendered language edit recolors without changing code');
+            let copied = null;
+            Object.defineProperty(navigator, 'clipboard', {configurable:true,value:{writeText:async text => {copied = text;}}});
+            blocks[0].querySelector('.code-copy-btn').click();
+            await new Promise(r => setTimeout(r, 0));
+            check(copied === editedCode, 'Copy reads edited code, not stale cache');
+            check(await a.saveCurrentFile(), 'Rendered code save succeeds');
+            const saved = await api.readFile(root + '/代码.md');
+            check(saved.content.includes('```py\\n' + editedCode + '```') && saved.content.includes('print("second block")') && !saved.content.includes('代码语言') && !a.isEdited, 'Saved file preserves language, code, trailing lines and neighboring blocks');
+            click('btn-toggle-source');
+            check(a.sourceTextareaEl.value.includes('```py\\n' + editedCode + '```'), 'Code edits survive switching to source');
+            click('btn-toggle-source');
+            code = a.markdownBodyEl.querySelector('.code-block-container pre code');
+            language = a.markdownBodyEl.querySelector('input.code-lang');
+            editor = a.markdownBodyEl.querySelector('textarea.code-editor');
+            check(editor.value === editedCode && language.value === 'py', 'Source roundtrip preserves edited code');
+            editor.focus(); editor.setSelectionRange(editor.value.length, editor.value.length);
+            editor.dispatchEvent(new KeyboardEvent('keydown', {key:'Tab',bubbles:true,cancelable:true}));
+            document.execCommand('insertText', false, '\\n');
+            check(liveCode() === editedCode + '  \\n', 'Code Tab and Enter insert plaintext without exiting the block: ' + JSON.stringify({text:liveCode(),html:code.innerHTML}));
+            const clipboard = new DataTransfer(); clipboard.setData('text/plain', 'x = 1\\n    # 中文\\n'); clipboard.setData('text/html', '<h1>wrong rich text</h1>');
+            editor.dispatchEvent(new ClipboardEvent('paste', {bubbles:true,cancelable:true,clipboardData:clipboard}));
+            check(liveCode() === editedCode + '  \\nx = 1\\n    # 中文\\n' && !code.querySelector('h1'), 'Code paste strips formatting and preserves plaintext');
+            const longLine = 'long_command --arg ' + 'x'.repeat(200);
+            selectCode(); document.execCommand('insertText', false, longLine);
+            editor.scrollLeft = 200; editor.dispatchEvent(new Event('scroll'));
+            check(editor.scrollLeft > 0 && Math.abs(editor.scrollLeft - code.parentElement.scrollLeft) <= 1, 'Long code horizontal scrolling keeps highlighted layer aligned');
+            language.focus(); language.value = 'not-a-language'; language.dispatchEvent(new Event('input', {bubbles:true}));
+            check(editor.value === longLine && !code.querySelector('[class^="hljs-"]'), 'Unknown language retains plaintext safely');
+            language.value = ''; language.dispatchEvent(new Event('input', {bubbles:true}));
+            click('btn-toggle-source');
+            check(a.sourceTextareaEl.value.includes('```\\n' + longLine), 'Clearing language produces an unlabelled fence');
+            click('btn-toggle-source');
+            await a.loadFile(root + '/未命名.md');
+            a.handleMenuAction('settings');
+            check(a.settingsDialogEl.open, 'Settings opens');
+            check(getComputedStyle(a.selectWidthEl).display !== 'none', 'Reading width is visible at 500px window size');
+            a.selectWidthEl.value = 'wide'; a.selectWidthEl.dispatchEvent(new Event('change'));
+            check(a.markdownBodyWrapperEl.classList.contains('width-wide'), 'Reading width setting applies');
+            a.selectThemeEl.value = 'dark'; a.selectThemeEl.dispatchEvent(new Event('change'));
+            a.settingsFontSizeEl.value = '20'; a.settingsFontSizeEl.dispatchEvent(new Event('change'));
+            check(document.documentElement.dataset.theme === 'dark' && a.markdownBodyEl.style.fontSize === '20px', 'Settings applies');
+            a.settingsFontSizeEl.value = '99'; a.settingsFontSizeEl.dispatchEvent(new Event('change'));
+            check(a.settingsFontSizeEl.value === '28', 'Font clamp');
+            a.settingsFontSizeEl.value = '20'; a.settingsFontSizeEl.dispatchEvent(new Event('change'));
+            click('btn-close-settings'); click('tab-files');
+            await window.electronAPI.saveSettings(a.currentSettings);
+            window.webkit.messageHandlers.nativeAPI.postMessage({id:'reload-tests',action:'test:reload',payload:{checks}});
+          } catch (error) {
+            window.webkit.messageHandlers.testResult.postMessage({success:false,detail:String(error) + '\\n' + (error.stack || '')});
+          }
+        })();
+        """) { [weak self] _, error in
+            if let error { self?.finish(false, "JavaScript execution: \(error)") }
+        }
+    }
+
+    func finish(_ success: Bool, _ detail: String) {
+        guard !completed else { return }
+        completed = true
+        timer?.invalidate()
+        print(detail)
+        try? FileManager.default.removeItem(at: fixtures)
+        exit(success ? 0 : 1)
+    }
+}
+
+@main
+struct TestRendererSuite {
+    @MainActor static func main() {
+        let app = NSApplication.shared
+        let delegate = RendererTests()
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)
+        app.run()
+    }
+}

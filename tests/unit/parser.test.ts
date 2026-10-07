@@ -1,7 +1,34 @@
 import { describe, it, expect } from 'vitest';
-import { parseMarkdown } from '../../src/renderer/modules/parser.ts';
+import { parseMarkdown, extractHeadings } from '../../src/renderer/modules/parser.ts';
 
 describe('Markdown Parser & Academic Content Pipeline', () => {
+  it('uses visible numbered headings without Markdown escape backslashes', () => {
+    const markdown = '# 1\\. **开头**\n## 2\\. [正文](https://example.com)\n### 3\\. 结尾';
+    const headings = extractHeadings(markdown);
+    expect(headings.map(h => h.text)).toEqual(['1. 开头', '2. 正文', '3. 结尾']);
+    const html = parseMarkdown(markdown);
+    for (const h of headings) expect(html).toContain(`id="${h.id}"`);
+  });
+
+  it('handles setext, duplicate, formatted and entity headings with matching anchors', () => {
+    const markdown = '标题 &amp; 小节\n===\n\n## **相同**\n## 相同\n## `C:\\Temp`\n## $x^2$ 公式';
+    const headings = extractHeadings(markdown);
+    expect(headings.map(h => h.text)).toEqual(['标题 & 小节', '相同', '相同', 'C:\\Temp', '$x^2$ 公式']);
+    expect(headings[2].id).toBe('相同-1');
+    const html = parseMarkdown(markdown);
+    for (const h of headings) expect(html).toContain(`id="${h.id}"`);
+  });
+
+  it('ignores headings in both tilde and backtick fences and indented code', () => {
+    const markdown = '~~~md\n# 不显示\n~~~\n\n```md\n## 也不显示\n```\n\n    # 代码\n\n## 显示';
+    expect(extractHeadings(markdown).map(h => h.text)).toEqual(['显示']);
+  });
+
+  it('keeps legitimate backslashes and literal trailing hash characters', () => {
+    expect(extractHeadings('# `C:\\Temp`\n## C#\n## 标题 ###').map(h => h.text))
+      .toEqual(['C:\\Temp', 'C#', '标题']);
+  });
+
   it('should parse GFM tables', () => {
     const md = `| Header 1 | Header 2 |\n| :--- | :---: |\n| Cell 1 | Cell 2 |`;
     const html = parseMarkdown(md, { currentFilePath: '/test/doc.md' });

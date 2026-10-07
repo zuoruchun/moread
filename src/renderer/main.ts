@@ -1,5 +1,6 @@
 import { parseMarkdown, extractHeadings } from './modules/parser.ts';
 import { htmlToMarkdown } from './modules/editor.ts';
+import { bindCodeBlockEditing, readCodeBlock } from './modules/codeBlocks.ts';
 import { OutlineController } from './modules/outline.ts';
 import { SearchController } from './modules/search.ts';
 import { FileTreeController } from './modules/fileTree.ts';
@@ -24,6 +25,8 @@ export class MoReadApp {
   public isSourceMode: boolean = false;
   public isEdited: boolean = false;
   private savedBadgeTimeout: ReturnType<typeof setTimeout> | null = null;
+  private fileTreeRootPath: string | null = null;
+  private folderRequestId = 0;
 
   // Controllers
   public outlineController!: OutlineController;
@@ -58,7 +61,8 @@ export class MoReadApp {
   public selectWidthEl!: HTMLSelectElement;
   public btnToggleSourceEl!: HTMLButtonElement;
   public btnToggleSidebarEl!: HTMLButtonElement;
-  public btnToggleOutlineEl!: HTMLButtonElement;
+  public settingsDialogEl!: HTMLDialogElement;
+  public settingsFontSizeEl!: HTMLInputElement;
 
   constructor() {
     this.initElements();
@@ -87,14 +91,15 @@ export class MoReadApp {
 
     this.statusFileSizeEl = document.getElementById('status-file-size')!;
     this.statusStatsEl = document.getElementById('status-stats')!;
-    this.statusModeBtnEl = document.getElementById('status-mode-btn')!;
+    this.statusModeBtnEl = document.getElementById('status-mode')!;
     this.statusSaveBadgeEl = document.getElementById('status-save-badge')!;
 
     this.selectThemeEl = document.getElementById('select-theme') as HTMLSelectElement;
     this.selectWidthEl = document.getElementById('select-reading-width') as HTMLSelectElement;
     this.btnToggleSourceEl = document.getElementById('btn-toggle-source') as HTMLButtonElement;
     this.btnToggleSidebarEl = document.getElementById('btn-toggle-sidebar') as HTMLButtonElement;
-    this.btnToggleOutlineEl = document.getElementById('btn-toggle-outline') as HTMLButtonElement;
+    this.settingsDialogEl = document.getElementById('reading-settings') as HTMLDialogElement;
+    this.settingsFontSizeEl = document.getElementById('settings-font-size') as HTMLInputElement;
 
     this.markdownBodyEl.contentEditable = 'true';
     this.markdownBodyEl.spellcheck = false;
@@ -133,11 +138,10 @@ export class MoReadApp {
     if (api) {
       api.onOpenFile((filePath) => this.loadFile(filePath));
       api.onOpenFolder?.(async (folderPath) => {
-        const folderRes = await window.electronAPI.readFolder(folderPath);
-        if (folderRes.success && folderRes.nodes) {
-          this.fileTreeController.update(folderRes.nodes, this.currentFilePath);
-          this.switchSidebarTab('files');
+        if (await this.loadFolderTree(folderPath)) {
+          this.switchSidebarTab('files', true);
           this.showSidebar();
+          this.saveSetting({ showSidebar: true });
         }
       });
       api.onFileChanged((changedPath) => {
@@ -184,14 +188,18 @@ export class MoReadApp {
 
     // Toolbar actions
     this.btnToggleSidebarEl.addEventListener('click', () => this.toggleSidebar());
-    this.btnToggleOutlineEl.addEventListener('click', () => this.toggleOutline());
     this.btnToggleSourceEl.addEventListener('click', () => this.toggleSourceView());
-    this.statusModeBtnEl?.addEventListener('click', () => this.toggleSourceView());
     document.getElementById('btn-search')?.addEventListener('click', () => this.searchController.open());
 
-    // Font size controls
-    document.getElementById('btn-font-increase')?.addEventListener('click', () => this.changeFontSize(1));
-    document.getElementById('btn-font-decrease')?.addEventListener('click', () => this.changeFontSize(-1));
+    document.getElementById('btn-close-settings')?.addEventListener('click', () => this.settingsDialogEl.close());
+    this.settingsFontSizeEl.addEventListener('change', () => {
+      const value = Number(this.settingsFontSizeEl.value);
+      if (Number.isFinite(value) && this.settingsFontSizeEl.value !== '') {
+        this.setFontSize(value);
+      } else {
+        this.settingsFontSizeEl.value = String(this.currentSettings.fontSize || 16);
+      }
+    });
 
     // Theme and Width selects
     this.selectThemeEl.addEventListener('change', () => {
@@ -207,8 +215,8 @@ export class MoReadApp {
     });
 
     // Sidebar tabs
-    this.outlineTabBtn.addEventListener('click', () => this.switchSidebarTab('outline'));
-    this.filesTabBtn.addEventListener('click', () => this.switchSidebarTab('files'));
+    this.outlineTabBtn.addEventListener('click', () => this.switchSidebarTab('outline', true));
+    this.filesTabBtn.addEventListener('click', () => this.switchSidebarTab('files', true));
 
     const appHeader = document.querySelector('.app-header');
     appHeader?.addEventListener('mousedown', (event) => {
@@ -229,6 +237,11 @@ export class MoReadApp {
 
     // Global keyboard shortcuts (Cmd+S for Save, Cmd+Shift+S for Mode toggle)
     window.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === ',') {
+        e.preventDefault();
+        this.openSettings();
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
         if (e.shiftKey) {
@@ -240,6 +253,7 @@ export class MoReadApp {
     });
 
     // WYSIWYG Editing listeners on markdown body
+    bindCodeBlockEditing(this.markdownBodyEl);
     this.markdownBodyEl.addEventListener('input', (e) => this.handleEditorInput(e));
     this.markdownBodyEl.addEventListener('click', (e) => this.handleContentClick(e));
 
@@ -286,7 +300,8 @@ export class MoReadApp {
 
     // 2. Code copy button
     if (target.classList.contains('code-copy-btn')) {
-      const rawCode = decodeURIComponent(target.dataset.code || '');
+      const container = target.closest('.code-block-container');
+      const rawCode = container ? readCodeBlock(container) : '';
       navigator.clipboard.writeText(rawCode).then(() => {
         const originalText = target.textContent;
         target.textContent = '已复制!';
@@ -418,6 +433,37 @@ export class MoReadApp {
 
     // Update file tree active item
     this.fileTreeController.setCurrentFile(filePath);
+    const parentPath = filePath.substring(0, filePath.lastIndexOf('/')) || '/';
+    const rootPath = this.fileTreeRootPath && filePath.startsWith(`${this.fileTreeRootPath.replace(/\/$/, '')}/`)
+      ? this.fileTreeRootPath : parentPath;
+    await this.loadFolderTree(rootPath, thisSessionId);
+  }
+
+  private async loadFolderTree(folderPath: string, renderSessionId?: number): Promise<boolean> {
+    const requestId = ++this.folderRequestId;
+    try {
+      const result = await window.electronAPI.readFolder(folderPath);
+      if (requestId !== this.folderRequestId ||
+          (renderSessionId !== undefined && renderSessionId !== this.renderSessionId)) return false;
+      if (!result.success || !result.nodes) throw new Error(result.error || '无法读取目录');
+      this.fileTreeRootPath = folderPath;
+      const currentPath = this.currentFilePath?.startsWith(`${folderPath.replace(/\/$/, '')}/`)
+        ? this.currentFilePath : null;
+      this.fileTreeController.update(result.nodes, currentPath);
+      return true;
+    } catch (error) {
+      if (requestId !== this.folderRequestId ||
+          (renderSessionId !== undefined && renderSessionId !== this.renderSessionId)) return false;
+      const path = this.currentFilePath;
+      this.fileTreeRootPath = null;
+      this.fileTreeController.update(path ? [{ name: path.split('/').pop()!, path, isDirectory: false }] : [], path);
+      const note = document.createElement('div');
+      note.className = 'file-tree-empty';
+      const detail = error instanceof Error ? error.message : '请重新打开文件夹';
+      note.textContent = `无法读取文件夹，当前仅显示已打开的文件：${detail}`;
+      this.filesContentEl.appendChild(note);
+      return false;
+    }
   }
 
   private async reloadCurrentFilePreservingScroll(): Promise<void> {
@@ -445,11 +491,10 @@ export class MoReadApp {
     if (!window.electronAPI) return;
     const res = await window.electronAPI.openFolderDialog();
     if (!res.canceled && res.folderPath) {
-      const folderRes = await window.electronAPI.readFolder(res.folderPath);
-      if (folderRes.success && folderRes.nodes) {
-        this.fileTreeController.update(folderRes.nodes, this.currentFilePath);
-        this.switchSidebarTab('files');
+      if (await this.loadFolderTree(res.folderPath)) {
+        this.switchSidebarTab('files', true);
         this.showSidebar();
+        this.saveSetting({ showSidebar: true });
       }
     }
   }
@@ -467,27 +512,32 @@ export class MoReadApp {
   public showSidebar(): void {
     this.sidebarEl.classList.remove('collapsed');
     this.btnToggleSidebarEl.classList.add('active');
+    this.btnToggleSidebarEl.setAttribute('aria-expanded', 'true');
   }
 
   public hideSidebar(): void {
     this.sidebarEl.classList.add('collapsed');
     this.btnToggleSidebarEl.classList.remove('active');
+    this.btnToggleSidebarEl.setAttribute('aria-expanded', 'false');
   }
 
   public toggleOutline(): void {
     if (this.sidebarEl.classList.contains('collapsed')) {
-      this.switchSidebarTab('outline');
+      this.switchSidebarTab('outline', true);
       this.showSidebar();
       this.saveSetting({ showSidebar: true });
     } else if (this.outlineTabBtn.classList.contains('active')) {
       this.hideSidebar();
       this.saveSetting({ showSidebar: false });
     } else {
-      this.switchSidebarTab('outline');
+      this.switchSidebarTab('outline', true);
     }
   }
 
-  public switchSidebarTab(tab: 'outline' | 'files'): void {
+  public switchSidebarTab(tab: 'outline' | 'files', persist = false): void {
+    this.outlineTabBtn.setAttribute('aria-selected', String(tab === 'outline'));
+    this.filesTabBtn.setAttribute('aria-selected', String(tab === 'files'));
+    if (persist) this.saveSetting({ sidebarTab: tab });
     if (tab === 'outline') {
       this.outlineTabBtn.classList.add('active');
       this.filesTabBtn.classList.remove('active');
@@ -495,7 +545,6 @@ export class MoReadApp {
       this.outlineContentEl.style.display = 'block';
       this.filesContentEl.classList.add('hidden');
       this.filesContentEl.style.display = 'none';
-      this.btnToggleOutlineEl.classList.add('active');
     } else {
       this.filesTabBtn.classList.add('active');
       this.outlineTabBtn.classList.remove('active');
@@ -503,7 +552,6 @@ export class MoReadApp {
       this.filesContentEl.style.display = 'block';
       this.outlineContentEl.classList.add('hidden');
       this.outlineContentEl.style.display = 'none';
-      this.btnToggleOutlineEl.classList.remove('active');
     }
   }
 
@@ -649,16 +697,6 @@ export class MoReadApp {
   private handleEditorInput(e: Event): void {
     this.markAsEdited();
 
-    const target = e.target as HTMLElement;
-    const container = target?.closest?.('.code-block-container');
-    if (container) {
-      const codeEl = container.querySelector('pre code');
-      const copyBtn = container.querySelector('.code-copy-btn');
-      if (codeEl && copyBtn) {
-        copyBtn.setAttribute('data-code', encodeURIComponent(codeEl.textContent || ''));
-      }
-    }
-
     const text = this.markdownBodyEl.innerText || '';
     this.updateStatsFromText(text);
   }
@@ -670,10 +708,18 @@ export class MoReadApp {
   }
 
   public changeFontSize(delta: number): void {
-    let current = parseInt(this.markdownBodyEl.style.fontSize || '16', 10);
-    current = Math.max(12, Math.min(28, current + delta));
-    this.markdownBodyEl.style.fontSize = `${current}px`;
-    this.saveSetting({ fontSize: current });
+    this.setFontSize(Number(this.currentSettings.fontSize || 16) + delta);
+  }
+
+  private setFontSize(value: number): void {
+    const fontSize = Math.max(12, Math.min(28, Math.round(value)));
+    this.markdownBodyEl.style.fontSize = `${fontSize}px`;
+    this.settingsFontSizeEl.value = String(fontSize);
+    this.saveSetting({ fontSize });
+  }
+
+  public openSettings(): void {
+    if (!this.settingsDialogEl.open) this.settingsDialogEl.showModal();
   }
 
   public applyTheme(theme: string): void {
@@ -697,7 +743,9 @@ export class MoReadApp {
     this.applyWidth(settings.readingWidth || 'standard');
     if (settings.fontSize) {
       this.markdownBodyEl.style.fontSize = `${settings.fontSize}px`;
+      this.settingsFontSizeEl.value = String(settings.fontSize);
     }
+    this.switchSidebarTab(settings.sidebarTab === 'files' ? 'files' : 'outline');
     if (settings.showSidebar) {
       this.showSidebar();
     } else {
@@ -797,8 +845,10 @@ export class MoReadApp {
         this.changeFontSize(-1);
         break;
       case 'zoom-reset':
-        this.markdownBodyEl.style.fontSize = '16px';
-        this.saveSetting({ fontSize: 16 });
+        this.setFontSize(16);
+        break;
+      case 'settings':
+        this.openSettings();
         break;
       case 'save':
         this.saveCurrentFile();

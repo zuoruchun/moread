@@ -1,6 +1,7 @@
 import TurndownService from 'turndown';
 // @ts-ignore
 import { gfm } from 'turndown-plugin-gfm';
+import { getCodeLanguage, readCodeBlock } from './codeBlocks.ts';
 
 export function createTurndownService(): TurndownService {
   const turndown = new TurndownService({
@@ -48,18 +49,13 @@ export function createTurndownService(): TurndownService {
     },
     replacement: (_content, node) => {
       const el = node as HTMLElement;
-      const copyBtn = el.querySelector('.code-copy-btn');
-      let rawCode = '';
-      if (copyBtn && copyBtn.getAttribute('data-code')) {
-        rawCode = decodeURIComponent(copyBtn.getAttribute('data-code') || '');
-      } else {
-        const codeEl = el.querySelector('pre code');
-        rawCode = codeEl ? codeEl.textContent || '' : '';
-      }
-      const langEl = el.querySelector('.code-lang');
-      const lang = langEl?.textContent?.trim() || '';
+      const rawCode = readCodeBlock(el);
+      const lang = getCodeLanguage(el);
       const cleanLang = (lang === 'text' || !lang) ? '' : lang;
-      return `\n\n\`\`\`${cleanLang}\n${rawCode.replace(/\n+$/, '')}\n\`\`\`\n\n`;
+      // A longer fence prevents pasted Markdown examples from closing the code block.
+      const longestRun = (rawCode.match(/`+/g) || []).reduce((longest, run) => Math.max(longest, run.length), 0);
+      const fence = '`'.repeat(Math.max(3, longestRun + 1));
+      return `\n\n${fence}${cleanLang}\n${rawCode}${rawCode.endsWith('\n') ? '' : '\n'}${fence}\n\n`;
     }
   });
 

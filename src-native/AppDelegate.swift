@@ -76,6 +76,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "关于 墨读 MoRead", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
+        let settingsItem = NSMenuItem(title: "设置...", action: #selector(menuSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "隐藏 墨读", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = NSMenuItem(title: "隐藏其他", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
         hideOthers.keyEquivalentModifierMask = [.command, .option]
@@ -134,11 +138,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         toggleOutlineItem.target = self
         viewMenu.addItem(toggleOutlineItem)
 
-        let toggleSidebarItem = NSMenuItem(title: "切换文件侧栏", action: #selector(menuToggleSidebar), keyEquivalent: "b")
+        let toggleSidebarItem = NSMenuItem(title: "切换侧边栏", action: #selector(menuToggleSidebar), keyEquivalent: "b")
         toggleSidebarItem.target = self
         viewMenu.addItem(toggleSidebarItem)
 
-        let toggleSourceItem = NSMenuItem(title: "切换只读源码", action: #selector(menuToggleSource), keyEquivalent: "S")
+        let toggleSourceItem = NSMenuItem(title: "切换源码 / 渲染", action: #selector(menuToggleSource), keyEquivalent: "S")
         toggleSourceItem.keyEquivalentModifierMask = [.command, .shift]
         toggleSourceItem.target = self
         viewMenu.addItem(toggleSourceItem)
@@ -172,6 +176,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Actions
+    @objc private func menuSettings() {
+        mainWindowController?.nativeBridge.notifyMenuAction("settings")
+    }
+
     @objc private func menuOpenFile() {
         mainWindowController?.showOpenFileDialog()
     }

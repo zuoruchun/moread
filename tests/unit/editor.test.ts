@@ -33,7 +33,7 @@ describe('Editor HTML to Markdown Converter', () => {
     <span class="code-lang">javascript</span>
     <button class="code-copy-btn" data-code="${encoded}">复制</button>
   </div>
-  <pre><code class="hljs language-javascript">highlighted</code></pre>
+  <pre><code class="hljs language-javascript"><span class="hljs-keyword">function</span> hello() {\n  console.log("world");\n}</code></pre>
 </div>`;
     const md = htmlToMarkdown(html);
     expect(md).toContain('```javascript');
@@ -84,5 +84,22 @@ describe('Editor HTML to Markdown Converter', () => {
   it('handles empty input gracefully', () => {
     const md = htmlToMarkdown('');
     expect(md.trim()).toBe('');
+  });
+
+  it('saves live code instead of a stale copy-button cache', () => {
+    const html = '<div class="code-block-container" data-language="python"><input class="code-lang" value="python"><button class="code-copy-btn" data-code="old%20code">复制</button><pre><code><span class="hljs-keyword">print</span>("更新")\n\n</code></pre></div>';
+    expect(htmlToMarkdown(html)).toBe('```python\nprint("更新")\n\n```\n');
+  });
+
+  it('handles empty code and edited plaintext line-break DOM', () => {
+    expect(htmlToMarkdown('<div class="code-block-container"><input class="code-lang" value=""><button>复制</button><pre><code></code></pre></div>'))
+      .toBe('```\n\n```\n');
+    expect(htmlToMarkdown('<div class="code-block-container" data-language="js"><button>复制</button><pre><code>one<div>two<br>three</div><div>four</div></code></pre></div>'))
+      .toContain('one\ntwo\nthree\nfour');
+  });
+
+  it('uses a safe fence for pasted Markdown examples and normalizes unsafe language input', () => {
+    const html = '<div class="code-block-container" data-language="markdown&#10;`"><button>复制</button><pre><code>```js\nconst x = 1;\n```\n</code></pre></div>';
+    expect(htmlToMarkdown(html)).toBe('````markdown\n```js\nconst x = 1;\n```\n````\n');
   });
 });

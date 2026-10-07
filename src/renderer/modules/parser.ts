@@ -24,10 +24,10 @@ const md = new MarkdownIt({
 });
 
 // Custom fence rule for code blocks (highlight + copy button)
-md.renderer.rules.fence = (tokens, idx) => {
+md.renderer.rules.fence = (tokens, idx, _options, env) => {
   const token = tokens[idx];
   const lang = (token.info || '').trim();
-  return highlightCode(token.content, lang);
+  return highlightCode(token.content, lang, env.readonly ?? true);
 };
 
 // Custom link rule to block dangerous protocols like javascript:
@@ -67,8 +67,8 @@ function fallbackSanitize(html: string): string {
   return html
     .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
     .replace(/<iframe\b[^<]*(?:(?!<\/iframe>)<[^<]*)*<\/iframe>/gi, '')
-    .replace(/\s*on\w+\s*=\s*(['"]).*?\1/gi, '')
-    .replace(/\s*on\w+\s*=\s*[^>\s]+/gi, '')
+    .replace(/\s+on\w+\s*=\s*(['"]).*?\1/gi, '')
+    .replace(/\s+on\w+\s*=\s*[^>\s]+/gi, '')
     .replace(/href\s*=\s*(['"])(javascript|data|vbscript):.*?\1/gi, 'href="#"')
     .replace(/src\s*=\s*(['"])(javascript|data|vbscript):.*?\1/gi, 'src=""')
     .replace(/\[([^\]]*)\]\((?:javascript|data|vbscript):[^)]*\)/gi, '$1');
@@ -123,15 +123,30 @@ export function sanitizeHtml(rawHtml: string): string {
 }
 
 export function parseMarkdown(content: string, options: ParseOptions = {}): string {
-  const headingsCount = new Map<string, number>();
+  const headings = extractHeadings(content);
+  let headingIndex = 0;
 
   // 1. Temporarily protect code blocks and inline code from math delimiter matching
   const codeBlocks: string[] = [];
-  let protectedContent = content.replace(/(```[\s\S]*?```|`[^`\n]+`)/g, (match) => {
+  const protectCode = (match: string): string => {
     const idx = codeBlocks.length;
     codeBlocks.push(match);
     return `@@@CODE_BLOCK_${idx}@@@`;
-  });
+  };
+  const lines = content.split('\n');
+  const offsets = [0];
+  for (const line of lines) offsets.push(offsets[offsets.length - 1] + line.length + 1);
+  let protectedContent = content;
+  // Token ranges also cover nested/list, tilde, long and unterminated fences.
+  const codeTokens = md.parse(content, {}).filter(token => token.map && (token.type === 'fence' || token.type === 'code_block'));
+  for (const token of codeTokens.reverse()) {
+    const [start, end] = token.map!;
+    const markerOffset = token.type === 'fence' ? Math.max(0, lines[start].indexOf(token.markup)) : 0;
+    const from = offsets[start] + markerOffset;
+    const to = Math.min(content.length, offsets[end]);
+    protectedContent = protectedContent.slice(0, from) + protectCode(content.slice(from, to)) + protectedContent.slice(to);
+  }
+  protectedContent = protectedContent.replace(/(`+)[^\n]*?\1(?!`)/g, protectCode);
 
   // 2. Extract and protect Display Math: $$ ... $$ and \[ ... \]
   const displayMathList: string[] = [];
@@ -168,9 +183,7 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
 
   // 5. Override heading rendering to assign IDs for anchors
   md.renderer.rules.heading_open = (tokens, idx, renderOpts, _env, self) => {
-    const nextToken = tokens[idx + 1];
-    const text = nextToken && nextToken.children ? nextToken.children.map(c => c.content).join('') : nextToken?.content || '';
-    const slug = generateSlug(text, headingsCount);
+    const slug = headings[headingIndex++]?.id || 'heading';
     tokens[idx].attrSet('id', slug);
     tokens[idx].attrSet('class', 'heading-anchor');
     return self.renderToken(tokens, idx, renderOpts);
@@ -183,7 +196,7 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
   protectedContent = protectedContent.replace(/^(\s*[-*+]\s+)\[[xX]\]\s+/gm, `$1<input type="checkbox" ${disabledAttr}checked class="task-list-item-checkbox"> `);
 
   // 7. Parse with Markdown-it
-  let renderedHtml = md.render(protectedContent);
+  let renderedHtml = md.render(protectedContent, { readonly: isReadonly });
 
   const MAX_MATH_COUNT = 500;
 
@@ -234,24 +247,20 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
 export function extractHeadings(markdown: string): HeadingItem[] {
   const headingsCount = new Map<string, number>();
   const headings: HeadingItem[] = [];
-  const lines = markdown.split('\n');
-  let inCodeBlock = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith('```')) {
-      inCodeBlock = !inCodeBlock;
-      continue;
-    }
-    if (inCodeBlock) continue;
-
-    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
-    if (headingMatch) {
-      const level = headingMatch[1].length;
-      const rawText = headingMatch[2].trim().replace(/\s*#*$/, '');
-      const id = generateSlug(rawText, headingsCount);
-      headings.push({ id, level, text: rawText });
-    }
+  const tokens = md.parse(markdown, {});
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.type !== 'heading_open') continue;
+    const inline = tokens[i + 1];
+    // Parsed inline text matches visible escapes, emphasis, links and entities.
+    // Genuine backslashes inside code are preserved.
+    const text = (inline.children || []).map(child => {
+      if (child.type === 'softbreak' || child.type === 'hardbreak') return ' ';
+      if (child.type === 'html_inline') return '';
+      return child.content;
+    }).join('').trim();
+    const id = generateSlug(text, headingsCount);
+    headings.push({ id, level: Number(token.tag.slice(1)), text });
   }
 
   return headings;

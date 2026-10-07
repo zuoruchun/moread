@@ -1,6 +1,6 @@
 {
   "name": "moread",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "description": "墨读 MoRead - 个人自用 macOS Markdown 阅读器 (Swift/AppKit + WKWebView)",
   "author": "Ruchun Zuo",
   "scripts": {
@@ -8,6 +8,8 @@
     "build:web": "tsc && vite build",
     "build": "./build-native.sh",
     "test": "vitest run",
+    "test:renderer": "npm run build:web && swiftc -parse-as-library -module-cache-path /tmp/moread-renderer-module-cache -target arm64-apple-macos14.0 -framework Cocoa -framework WebKit tests/native/TestRendererSuite.swift -o /tmp/moread-renderer-tests && /tmp/moread-renderer-tests \"$PWD/dist-renderer\"",
+    "test:renderer:bridge": "npm run build:web && swiftc -D MOREAD_BRIDGE_INTEGRATION -parse-as-library -module-cache-path /tmp/moread-renderer-module-cache -target arm64-apple-macos14.0 -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers src-native/SettingsManager.swift src-native/FileWatcher.swift src-native/LocalFileSchemeHandler.swift src-native/NativeBridge.swift tests/native/TestRendererSuite.swift -o /tmp/moread-renderer-bridge-tests && /tmp/moread-renderer-bridge-tests \"$PWD/dist-renderer\"",
     "test:native": "swiftc -O -module-cache-path /tmp/moread-swift-module-cache -target arm64-apple-macos14.0 -framework WebKit -framework UniformTypeIdentifiers src-native/SettingsManager.swift src-native/FileWatcher.swift src-native/LocalFileSchemeHandler.swift tests/native/TestNativeSuite.swift -o /tmp/run_native_tests && /tmp/run_native_tests"
   },
   "dependencies": {
