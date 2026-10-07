@@ -1,14 +1,20 @@
 import Cocoa
 
 public final class AppDelegate: NSObject, NSApplicationDelegate {
-    public var mainWindowController: MainWindowController?
+    public var windowControllers: [MainWindowController] = []
+    public var activeWindowController: MainWindowController? {
+        windowControllers.first(where: { $0.window?.isKeyWindow == true }) ?? windowControllers.last
+    }
+    public var mainWindowController: MainWindowController? {
+        activeWindowController
+    }
     private var pendingOpenFilePaths: [String] = []
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         setupMainMenu()
 
         let controller = MainWindowController()
-        self.mainWindowController = controller
+        windowControllers.append(controller)
         controller.presentWindow()
 
         // Check command-line arguments for file paths to open
@@ -33,15 +39,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
-            mainWindowController?.presentWindow()
+        if !flag || windowControllers.isEmpty {
+            menuNewWindow()
+        } else {
+            activeWindowController?.presentWindow()
         }
         return true
     }
 
+    public func removeWindowController(_ controller: MainWindowController) {
+        windowControllers.removeAll(where: { $0 === controller })
+    }
+
     private func openFiles(_ paths: [String]) {
         guard !paths.isEmpty else { return }
-        if let controller = mainWindowController {
+        if let controller = activeWindowController {
             controller.presentWindow()
             controller.openFiles(paths)
         } else {
@@ -93,6 +105,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // 2. File Menu
         let fileMenuItem = NSMenuItem()
         let fileMenu = NSMenu(title: "文件")
+
+        let newWindowItem = NSMenuItem(title: "新建窗口", action: #selector(menuNewWindow), keyEquivalent: "n")
+        newWindowItem.target = self
+        fileMenu.addItem(newWindowItem)
+
+        let newTabItem = NSMenuItem(title: "新建标签页", action: #selector(menuNewTab), keyEquivalent: "t")
+        newTabItem.target = self
+        fileMenu.addItem(newTabItem)
+
+        fileMenu.addItem(NSMenuItem.separator())
+
         let openItem = NSMenuItem(title: "打开 Markdown 文件...", action: #selector(menuOpenFile), keyEquivalent: "o")
         openItem.target = self
         fileMenu.addItem(openItem)
@@ -107,8 +130,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         saveItem.target = self
         fileMenu.addItem(saveItem)
 
+        let saveAsItem = NSMenuItem(title: "另存为...", action: #selector(menuSaveAs), keyEquivalent: "S")
+        saveAsItem.keyEquivalentModifierMask = [.command, .option, .shift]
+        saveAsItem.target = self
+        fileMenu.addItem(saveAsItem)
+
+        let saveCopyItem = NSMenuItem(title: "存储副本...", action: #selector(menuSaveCopy), keyEquivalent: "")
+        saveCopyItem.target = self
+        fileMenu.addItem(saveCopyItem)
+
         fileMenu.addItem(NSMenuItem.separator())
-        fileMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        let exportPDFItem = NSMenuItem(title: "导出为 PDF...", action: #selector(menuExportPDF), keyEquivalent: "p")
+        exportPDFItem.keyEquivalentModifierMask = [.command, .option]
+        exportPDFItem.target = self
+        fileMenu.addItem(exportPDFItem)
+
+        fileMenu.addItem(NSMenuItem.separator())
+        let closeItem = NSMenuItem(title: "关闭标签页", action: #selector(menuCloseTab), keyEquivalent: "w")
+        closeItem.target = self
+        fileMenu.addItem(closeItem)
+
         fileMenuItem.submenu = fileMenu
         mainMenu.addItem(fileMenuItem)
 
@@ -123,6 +164,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenu.addItem(NSMenuItem.separator())
+
+        let toggleEditItem = NSMenuItem(title: "切换编辑 / 阅读模式", action: #selector(menuToggleEdit), keyEquivalent: "e")
+        toggleEditItem.target = self
+        editMenu.addItem(toggleEditItem)
 
         let findItem = NSMenuItem(title: "在文档中搜索...", action: #selector(menuSearch), keyEquivalent: "f")
         findItem.target = self
@@ -176,47 +221,78 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Actions
+    @objc public func menuNewWindow() {
+        let currentFolder = activeWindowController?.currentFolderPath
+        let controller = MainWindowController(initialFolderPath: currentFolder)
+        windowControllers.append(controller)
+        controller.presentWindow()
+    }
+
+    @objc private func menuNewTab() {
+        activeWindowController?.nativeBridge.notifyMenuAction("new-tab")
+    }
+
+    @objc private func menuCloseTab() {
+        activeWindowController?.nativeBridge.notifyMenuAction("close-tab")
+    }
+
     @objc private func menuSettings() {
-        mainWindowController?.nativeBridge.notifyMenuAction("settings")
+        activeWindowController?.nativeBridge.notifyMenuAction("settings")
     }
 
     @objc private func menuOpenFile() {
-        mainWindowController?.showOpenFileDialog()
+        activeWindowController?.showOpenFileDialog()
     }
 
     @objc private func menuOpenFolder() {
-        mainWindowController?.showOpenFolderDialog()
+        activeWindowController?.showOpenFolderDialog()
     }
 
     @objc private func menuSaveFile() {
-        mainWindowController?.saveDocument()
+        activeWindowController?.saveDocument()
+    }
+
+    @objc private func menuSaveAs() {
+        activeWindowController?.nativeBridge.notifyMenuAction("save-as")
+    }
+
+    @objc private func menuSaveCopy() {
+        activeWindowController?.nativeBridge.notifyMenuAction("save-copy")
+    }
+
+    @objc private func menuExportPDF() {
+        activeWindowController?.exportPDF()
+    }
+
+    @objc private func menuToggleEdit() {
+        activeWindowController?.nativeBridge.notifyMenuAction("toggle-edit")
     }
 
     @objc private func menuSearch() {
-        mainWindowController?.nativeBridge.notifyMenuAction("find")
+        activeWindowController?.nativeBridge.notifyMenuAction("find")
     }
 
     @objc private func menuToggleOutline() {
-        mainWindowController?.nativeBridge.notifyMenuAction("toggle-outline")
+        activeWindowController?.nativeBridge.notifyMenuAction("toggle-outline")
     }
 
     @objc private func menuToggleSidebar() {
-        mainWindowController?.nativeBridge.notifyMenuAction("toggle-sidebar")
+        activeWindowController?.nativeBridge.notifyMenuAction("toggle-sidebar")
     }
 
     @objc private func menuToggleSource() {
-        mainWindowController?.nativeBridge.notifyMenuAction("toggle-source")
+        activeWindowController?.nativeBridge.notifyMenuAction("toggle-source")
     }
 
     @objc private func menuZoomIn() {
-        mainWindowController?.zoomIn()
+        activeWindowController?.zoomIn()
     }
 
     @objc private func menuZoomOut() {
-        mainWindowController?.zoomOut()
+        activeWindowController?.zoomOut()
     }
 
     @objc private func menuZoomActual() {
-        mainWindowController?.zoomActual()
+        activeWindowController?.zoomActual()
     }
 }

@@ -100,6 +100,22 @@
   vertical-align: middle;
   cursor: pointer;
 }
+.mode-read .task-list-item-checkbox {
+  cursor: default;
+  pointer-events: none;
+}
+.mode-read .code-lang-select {
+  pointer-events: none;
+  cursor: default;
+}
+.mode-read .code-editor {
+  pointer-events: none;
+  user-select: text;
+}
+
+.markdown-body img {
+  cursor: zoom-in;
+}
 
 /* Tables */
 .table-container {

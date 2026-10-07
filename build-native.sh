@@ -6,7 +6,7 @@ echo "  墨读 MoRead - Native Swift/WebKit Build"
 echo "=========================================="
 
 APP_NAME="MoRead"
-VERSION="1.4.0"
+VERSION="1.5.1"
 DIST_DIR="$(pwd)/dist"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 CONTENTS="${APP_BUNDLE}/Contents"
@@ -31,9 +31,11 @@ swiftc -O -module-cache-path /tmp/moread-build-module-cache -target arm64-apple-
   -framework Cocoa \
   -framework WebKit \
   -framework UniformTypeIdentifiers \
+  -framework PDFKit \
   src-native/main.swift \
   src-native/AppDelegate.swift \
   src-native/MainWindowController.swift \
+  src-native/PDFExporter.swift \
   src-native/NativeBridge.swift \
   src-native/LocalFileSchemeHandler.swift \
   src-native/FileWatcher.swift \
@@ -76,7 +78,7 @@ ditto -c -k --keepParent "${APP_BUNDLE}" "${ZIP_PATH}"
 
 # Generate Checksums
 cd "${DIST_DIR}"
-shasum -a 256 "${APP_NAME}-${VERSION}-arm64.dmg" "${APP_NAME}-${VERSION}-arm64.zip" > SHA256SUMS.txt
+shasum -a 256 *.dmg *.zip > SHA256SUMS.txt
 cd - > /dev/null
 
 echo "=========================================="

@@ -1,0 +1,42 @@
+/* Dedicated print document: no application layout, viewport height or editor controls. */
+:root {
+  --font-mono: "SF Mono", Menlo, Monaco, Consolas, monospace;
+  --text-primary: #24292f;
+  --text-secondary: #57606a;
+  --text-muted: #8c959f;
+  --bg-primary: #fff;
+  --bg-secondary: #f6f8fa;
+  --bg-tertiary: #ebeef1;
+  --border-color: #d0d7de;
+  --accent-color: #0969da;
+  --code-bg: #f6f8fa;
+  --danger-color: #cf222e;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: auto; overflow: visible; background: white; }
+.markdown-body {
+  min-height: 0; width: 100%; max-width: none; margin: 0; padding: 0;
+  font-size: 11pt; line-height: 1.6;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+.markdown-body > :first-child { margin-top: 0; }
+h1, h2, h3, h4, h5, h6, .code-block-header { break-after: avoid; page-break-after: avoid; }
+p, li { orphans: 3; widows: 3; }
+.code-block-container, blockquote, .math-block-wrapper { break-inside: avoid; page-break-inside: avoid; }
+/* Oversized blocks must be allowed to flow across pages, not clip at the paper edge. */
+.pdf-splittable { break-inside: auto !important; page-break-inside: auto !important; }
+.code-block-container, .table-container { overflow: visible; border-radius: 0; }
+.markdown-body pre { margin: 0; padding: 10pt 12pt; overflow: visible; }
+.markdown-body pre, .markdown-body pre code {
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal;
+  font-size: 9pt; line-height: 1.5;
+}
+.table-container, .markdown-body table { break-inside: auto; page-break-inside: auto; }
+.markdown-body table { table-layout: fixed; font-size: 9pt; }
+.markdown-body th, .markdown-body td { padding: 6pt; overflow-wrap: anywhere; }
+thead { display: table-header-group; }
+tr { break-inside: avoid; page-break-inside: avoid; }
+.markdown-body img { max-width: 100%; max-height: 650pt; object-fit: contain; break-inside: avoid; }
+.math-block-wrapper { overflow: visible; }
+mjx-container svg { max-width: 100%; }
+button, textarea, .raw-math-marker, mjx-assistive-mml { display: none !important; }

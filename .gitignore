@@ -4,5 +4,6 @@ dist-electron/
 dist-renderer/
 release/
 test-results/
+_codex_sessions/MoReadBugs/tmp/
 .DS_Store
 *.log

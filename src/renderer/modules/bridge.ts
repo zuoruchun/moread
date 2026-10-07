@@ -1,11 +1,19 @@
-// Bridge between WebKit WKWebView (or Electron) and Frontend
 export interface BridgeAPI {
   rendererReady: () => Promise<void>;
   beginWindowDrag: () => Promise<void>;
+  newWindow?: () => Promise<{ success: boolean }>;
   openFileDialog: () => Promise<{ canceled: boolean; filePath?: string }>;
   openFolderDialog: () => Promise<{ canceled: boolean; folderPath?: string }>;
-  readFile: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string; stats?: { size: number; mtime: number } }>;
-  writeFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string; stats?: { size: number; mtime: number } }>;
+  saveAsDialog: (currentPath?: string, content?: string) => Promise<{ canceled: boolean; filePath?: string }>;
+  saveCopyDialog: (currentPath?: string, content?: string) => Promise<{ canceled: boolean; filePath?: string; success?: boolean; error?: string }>;
+  exportPDF: () => Promise<{ success: boolean; error?: string }>;
+  saveDraft: (draft: { id: string; filePath?: string; content: string; timestamp: number }) => Promise<{ success: boolean }>;
+  getAllDrafts: () => Promise<{ drafts: Array<{ id: string; filePath?: string; content: string; timestamp: number }> }>;
+  deleteDraft: (id: string) => Promise<{ success: boolean }>;
+  clearDrafts: () => Promise<{ success: boolean }>;
+  checkConflict: (filePath: string, baselineRevision: string) => Promise<{ conflict: boolean; currentRevision?: string; reason?: string }>;
+  readFile: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string; stats?: { size: number; mtime: number; revision?: string; hasBOM?: boolean; lineEnding?: '\n' | '\r\n'; isReadOnly?: boolean } }>;
+  writeFile: (filePath: string, content: string, expectedRevision?: string, options?: { hasBOM?: boolean; lineEnding?: string }) => Promise<{ success: boolean; error?: string; stats?: { size: number; mtime: number; revision?: string } }>;
   setDocumentEdited: (isEdited: boolean) => Promise<{ success: boolean }>;
   confirmSaveDialog: (fileName: string) => Promise<{ action: 'save' | 'dont-save' | 'cancel' }>;
   closeWindow: () => Promise<{ success: boolean }>;
@@ -126,10 +134,19 @@ export function initNativeBridge(): BridgeAPI {
     const nativeAPI: BridgeAPI = {
       rendererReady: () => callNative('app:renderer-ready'),
       beginWindowDrag: () => callNative('window:begin-drag'),
+      newWindow: () => callNative('window:new-window'),
       openFileDialog: () => callNative('dialog:open-file', undefined, 0),
       openFolderDialog: () => callNative('dialog:open-folder', undefined, 0),
+      saveAsDialog: (currentPath?: string, content?: string) => callNative('dialog:save-as', { currentPath, content }, 0),
+      saveCopyDialog: (currentPath?: string, content?: string) => callNative('dialog:save-copy', { currentPath, content }, 0),
+      exportPDF: () => callNative('export:pdf', undefined, 0),
+      saveDraft: (draft) => callNative('drafts:save', draft),
+      getAllDrafts: () => callNative('drafts:get-all'),
+      deleteDraft: (id) => callNative('drafts:delete', { id }),
+      clearDrafts: () => callNative('drafts:clear-all'),
+      checkConflict: (filePath, baselineRevision) => callNative('fs:check-conflict', { filePath, baselineRevision }),
       readFile: (filePath: string) => callNative('fs:read-file', { filePath }),
-      writeFile: (filePath: string, content: string) => callNative('fs:write-file', { filePath, content }),
+      writeFile: (filePath: string, content: string, expectedRevision?: string, options?: { hasBOM?: boolean; lineEnding?: string }) => callNative('fs:write-file', { filePath, content, expectedRevision, ...options }),
       setDocumentEdited: (isEdited: boolean) => callNative('window:set-edited', { isEdited }),
       confirmSaveDialog: (fileName: string) => callNative('dialog:confirm-save', { fileName }, 0),
       closeWindow: () => callNative('window:close'),

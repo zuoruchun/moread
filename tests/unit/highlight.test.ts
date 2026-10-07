@@ -39,6 +39,24 @@ describe('Editable code blocks and syntax colors', () => {
     expect(htmlToMarkdown(html)).toBe(md + '\n');
   });
 
+  it('does not expose the fence separator as an extra editable blank line', () => {
+    for (const raw of ['qwen-end', 'qwen-start \\\n  --gpu 1 \\\n  --max-model-len 98304 \\\n  --gpu-memory-utilization 0.90', 'first\n\n', '']) {
+      const markdown = '```bash\n' + raw + '\n```\n';
+      const html = parseMarkdown(markdown, { readonly: false });
+      expect(html.match(/<textarea\b[^>]*>([\s\S]*?)<\/textarea>/)?.[1]).toBe(raw);
+      expect(htmlToMarkdown(html)).toBe(markdown);
+    }
+  });
+
+  it('keeps genuine trailing blank lines in editable and readonly roundtrips', () => {
+    const markdown = '```bash\nfirst\n\n\n```\n';
+    for (const readonly of [true, false]) {
+      let current = markdown;
+      for (let i = 0; i < 3; i++) current = htmlToMarkdown(parseMarkdown(current, { readonly }));
+      expect(current).toBe(markdown);
+    }
+  });
+
   it('protects math-like text inside long, tilde and unterminated fences', () => {
     for (const md of ['````md\n```\n$$x$$\n```\n````', '~~~bash\necho "$foo$"\n~~~', '```bash\necho "$foo$"', '- ```bash\n  echo "$foo$"\n  ```', '    echo "$foo$"']) {
       const html = parseMarkdown(md);

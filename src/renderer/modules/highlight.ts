@@ -65,7 +65,7 @@ export function highlightCode(code: string, lang: string, readonly = true): stri
   const codeEditor = readonly ? `<pre>${codeMarkup}</pre>` : `<div class="code-editor-wrapper"><pre>${codeMarkup}<textarea class="code-editor" aria-label="代码内容" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off">${escapeHtml(code)}</textarea></pre></div>`;
 
   return `
-<div class="code-block-container" contenteditable="false" data-language="${escapeHtml(cleanLang)}">
+<div class="code-block-container" contenteditable="false" data-language="${escapeHtml(cleanLang)}" data-fence-body="true">
   <div class="code-block-header" contenteditable="false">
     ${languageControl}
     <button class="code-copy-btn" data-code="${encodedRawCode}" title="复制全部代码" aria-label="复制代码">复制</button>

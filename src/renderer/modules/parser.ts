@@ -27,7 +27,9 @@ const md = new MarkdownIt({
 md.renderer.rules.fence = (tokens, idx, _options, env) => {
   const token = tokens[idx];
   const lang = (token.info || '').trim();
-  return highlightCode(token.content, lang, env.readonly ?? true);
+  // The final newline separates the body from its closing fence; it is not an empty row.
+  const body = token.content.replace(/\n$/, '');
+  return highlightCode(body, lang, env.readonly ?? true);
 };
 
 // Custom link rule to block dangerous protocols like javascript:
@@ -221,22 +223,25 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
   });
 
   // 10. Handle Relative Images and URL Safety
-  if (options.currentFilePath) {
-    const currentDir = options.currentFilePath.substring(0, options.currentFilePath.lastIndexOf('/'));
+  {
+    const currentDir = options.currentFilePath?.substring(0, options.currentFilePath.lastIndexOf('/'));
     renderedHtml = renderedHtml.replace(/<img\s+([^>]*?)src=(["'])(.*?)\2([^>]*?)>/gi, (fullImg, before, quote, src, after) => {
       let resolvedSrc = src;
-      if (!src.startsWith('data:') && !src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('mored://')) {
-        let fullPath = src;
-        if (!src.startsWith('/')) {
-          fullPath = `${currentDir}/${src}`;
+      if (currentDir !== undefined && !/^(data:|mored:|(https?:)?\/\/)/i.test(src)) {
+        // Markdown-it URL-encodes spaces and non-ASCII names; decode once before file access.
+        let localPath = src;
+        try { localPath = decodeURIComponent(src); } catch { /* Keep literal malformed escapes. */ }
+        let fullPath = localPath;
+        if (!localPath.startsWith('/')) {
+          fullPath = `${currentDir}/${localPath}`;
         }
         resolvedSrc = `mored://local?path=${encodeURIComponent(fullPath)}`;
-      } else if (src.startsWith('http://') || src.startsWith('https://')) {
+      } else if (/^(https?:)?\/\//i.test(src)) {
         if (!options.allowRemoteImages) {
           return `<div class="remote-image-blocked" title="远程图片已默认拦截以保护隐私 (可在设置中启用)">[远程图片已拦截: ${escapeHtml(src)}]</div>`;
         }
       }
-      return `<img ${before}src=${quote}${resolvedSrc}${quote}${after} loading="lazy" class="mored-image">`;
+      return `<img ${before}src=${quote}${resolvedSrc}${quote}${after} data-original-src="${escapeHtml(src)}" loading="lazy" class="mored-image">`;
     });
   }
 

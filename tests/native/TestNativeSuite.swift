@@ -211,6 +211,11 @@ struct TestRunner {
             let initial = settingsManager.getSettings()
             assertTrue(initial["theme"] != nil, "Settings contains theme property")
             assertTrue(initial["readingWidth"] != nil, "Settings contains readingWidth property")
+            assertEqual(initial["saveMode"] as? String, "manual", "Save mode defaults to manual")
+            settingsManager.saveSettings(["saveMode": "auto"])
+            assertEqual(settingsManager.getSettings()["saveMode"] as? String, "auto", "Auto save mode persists")
+            settingsManager.saveSettings(["saveMode": "manual"])
+            assertEqual(settingsManager.getSettings()["saveMode"] as? String, "manual", "Manual save mode persists")
 
             settingsManager.saveSettings(["theme": "dark", "fontSize": 18])
             let updated = settingsManager.getSettings()

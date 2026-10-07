@@ -2,11 +2,13 @@ import Foundation
 import WebKit
 import Cocoa
 import UniformTypeIdentifiers
+import CryptoKit
 
 public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     public weak var windowController: MainWindowController?
     private var fileWatcher: FileWatcher?
     private let authorizationLock = NSLock()
+    private let writeLock = NSLock()
     private var authorizedDirectories = Set<String>()
 
     public override init() {
@@ -32,10 +34,26 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
         case "window:begin-drag":
             windowController?.beginWindowDrag()
             sendResponse(id: id, result: ["success": true])
+        case "window:new-window":
+            handleNewWindow(id: id)
         case "dialog:open-file":
             handleOpenFile(id: id)
         case "dialog:open-folder":
             handleOpenFolder(id: id)
+        case "dialog:save-as":
+            handleSaveAsDialog(id: id, payload: payload)
+        case "dialog:save-copy":
+            handleSaveCopyDialog(id: id, payload: payload)
+        case "export:pdf":
+            handleExportPDF(id: id)
+        case "drafts:save":
+            handleSaveDraft(id: id, payload: payload)
+        case "drafts:get-all":
+            handleGetAllDrafts(id: id)
+        case "drafts:delete":
+            handleDeleteDraft(id: id, payload: payload)
+        case "drafts:clear-all":
+            handleClearAllDrafts(id: id)
         case "fs:read-file":
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.handleReadFile(id: id, payload: payload)
@@ -44,6 +62,8 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.handleWriteFile(id: id, payload: payload)
             }
+        case "fs:check-conflict":
+            handleCheckConflict(id: id, payload: payload)
         case "window:set-edited":
             handleSetWindowEdited(id: id, payload: payload)
         case "dialog:confirm-save":
@@ -118,6 +138,201 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
         }
     }
 
+    private func handleSaveAsDialog(id: String, payload: [String: Any]) {
+        let currentPath = payload["currentPath"] as? String
+        let content = payload["content"] as? String
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let window = self.windowController?.window else {
+                self?.sendResponse(id: id, result: ["canceled": true])
+                return
+            }
+            let panel = NSSavePanel()
+            panel.title = "另存为 Markdown 文件"
+            panel.allowedContentTypes = [
+                UTType(filenameExtension: "md") ?? .plainText,
+                UTType(filenameExtension: "markdown") ?? .plainText,
+                .plainText
+            ]
+            panel.canCreateDirectories = true
+            if let currentPath = currentPath, !currentPath.isEmpty {
+                let url = URL(fileURLWithPath: currentPath)
+                panel.directoryURL = url.deletingLastPathComponent()
+                panel.nameFieldStringValue = url.lastPathComponent
+            } else {
+                panel.nameFieldStringValue = "未命名.md"
+            }
+
+            panel.beginSheetModal(for: window) { response in
+                if response == .OK, let targetURL = panel.url {
+                    self.authorizeFile(targetURL.path)
+                    if let content = content, let data = content.data(using: .utf8) {
+                        try? data.write(to: targetURL, options: .atomic)
+                    }
+                    self.fileWatcher?.watch(filePath: targetURL.path)
+                    self.windowController?.allowLocalResources(forDocument: targetURL.path)
+                    self.sendResponse(id: id, result: [
+                        "canceled": false,
+                        "filePath": targetURL.path
+                    ])
+                } else {
+                    self.sendResponse(id: id, result: ["canceled": true])
+                }
+            }
+        }
+    }
+
+    private func handleSaveCopyDialog(id: String, payload: [String: Any]) {
+        let currentPath = payload["currentPath"] as? String
+        guard let content = payload["content"] as? String else {
+            sendResponse(id: id, result: ["canceled": true, "error": "缺少保存内容"])
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let window = self.windowController?.window else {
+                self?.sendResponse(id: id, result: ["canceled": true])
+                return
+            }
+            let panel = NSSavePanel()
+            panel.title = "存储副本为"
+            panel.allowedContentTypes = [
+                UTType(filenameExtension: "md") ?? .plainText,
+                UTType(filenameExtension: "markdown") ?? .plainText,
+                .plainText
+            ]
+            panel.canCreateDirectories = true
+            if let currentPath = currentPath, !currentPath.isEmpty {
+                let url = URL(fileURLWithPath: currentPath)
+                let baseName = url.deletingPathExtension().lastPathComponent
+                panel.directoryURL = url.deletingLastPathComponent()
+                panel.nameFieldStringValue = "\(baseName) 副本.md"
+            } else {
+                panel.nameFieldStringValue = "副本.md"
+            }
+
+            panel.beginSheetModal(for: window) { response in
+                if response == .OK, let targetURL = panel.url {
+                    self.authorizeFile(targetURL.path)
+                    if let data = content.data(using: .utf8) {
+                        do {
+                            try data.write(to: targetURL, options: .atomic)
+                            self.sendResponse(id: id, result: [
+                                "canceled": false,
+                                "filePath": targetURL.path,
+                                "success": true
+                            ])
+                        } catch {
+                            self.sendResponse(id: id, result: [
+                                "canceled": false,
+                                "success": false,
+                                "error": "写入文件失败: \(error.localizedDescription)"
+                            ])
+                        }
+                    }
+                } else {
+                    self.sendResponse(id: id, result: ["canceled": true])
+                }
+            }
+        }
+    }
+
+    private func handleExportPDF(id: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let host = self.windowController else { return }
+            host.exportPDF { [weak self] result in self?.sendResponse(id: id, result: result) }
+        }
+    }
+
+    private var draftsDirectory: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let draftsDir = appSupport.appendingPathComponent("MoRead/Drafts", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: draftsDir.path) {
+            try? FileManager.default.createDirectory(at: draftsDir, withIntermediateDirectories: true)
+        }
+        return draftsDir
+    }
+
+    private func handleSaveDraft(id: String, payload: [String: Any]) {
+        guard let draftId = payload["id"] as? String, !draftId.isEmpty else {
+            sendResponse(id: id, result: ["success": false, "error": "无效的草稿 ID"])
+            return
+        }
+        let safeName = draftId.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_")
+        let draftURL = draftsDirectory.appendingPathComponent("\(safeName).json")
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]) {
+            try? data.write(to: draftURL, options: .atomic)
+            sendResponse(id: id, result: ["success": true])
+        } else {
+            sendResponse(id: id, result: ["success": false, "error": "草稿序列化失败"])
+        }
+    }
+
+    private func handleGetAllDrafts(id: String) {
+        let dir = draftsDirectory
+        guard let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else {
+            sendResponse(id: id, result: ["drafts": []])
+            return
+        }
+        var drafts: [[String: Any]] = []
+        for file in files where file.pathExtension == "json" {
+            if let data = try? Data(contentsOf: file),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                drafts.append(json)
+            }
+        }
+        sendResponse(id: id, result: ["drafts": drafts])
+    }
+
+    private func handleDeleteDraft(id: String, payload: [String: Any]) {
+        guard let draftId = payload["id"] as? String, !draftId.isEmpty else {
+            sendResponse(id: id, result: ["success": false])
+            return
+        }
+        let safeName = draftId.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: ":", with: "_")
+        let draftURL = draftsDirectory.appendingPathComponent("\(safeName).json")
+        try? FileManager.default.removeItem(at: draftURL)
+        sendResponse(id: id, result: ["success": true])
+    }
+
+    private func handleClearAllDrafts(id: String) {
+        let dir = draftsDirectory
+        if let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            for file in files {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+        sendResponse(id: id, result: ["success": true])
+    }
+
+    private func handleCheckConflict(id: String, payload: [String: Any]) {
+        guard let filePath = payload["filePath"] as? String, !filePath.isEmpty,
+              let baselineRevision = payload["baselineRevision"] as? String else {
+            sendResponse(id: id, result: ["conflict": false])
+            return
+        }
+        let url = URL(fileURLWithPath: NSString(string: filePath).expandingTildeInPath).standardizedFileURL
+        guard let rawData = try? Data(contentsOf: url) else {
+            sendResponse(id: id, result: ["conflict": true, "reason": "文件不存在或无法读取"])
+            return
+        }
+        let currentRevision = SHA256.hash(data: rawData).map { String(format: "%02x", $0) }.joined()
+        let conflict = currentRevision != baselineRevision
+        sendResponse(id: id, result: [
+            "conflict": conflict,
+            "currentRevision": currentRevision
+        ])
+    }
+
+    private func handleNewWindow(id: String) {
+        DispatchQueue.main.async {
+            #if !MOREAD_BRIDGE_INTEGRATION
+            if let appDelegate = NSApp.delegate as? AppDelegate {
+                appDelegate.menuNewWindow()
+            }
+            #endif
+        }
+        sendResponse(id: id, result: ["success": true])
+    }
+
     // MARK: - File System Handlers (Strictly Read-Only)
     private func handleReadFile(id: String, payload: [String: Any]) {
         guard let filePath = payload["filePath"] as? String, !filePath.isEmpty else {
@@ -166,7 +381,8 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
 
         // Strip UTF-8 BOM if present (0xEF, 0xBB, 0xBF)
         var contentData = rawData
-        if contentData.count >= 3 && contentData[0] == 0xEF && contentData[1] == 0xBB && contentData[2] == 0xBF {
+        let hasBOM = contentData.count >= 3 && contentData[0] == 0xEF && contentData[1] == 0xBB && contentData[2] == 0xBF
+        if hasBOM {
             contentData = contentData.subdata(in: 3..<contentData.count)
         }
 
@@ -178,13 +394,21 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
             return
         }
 
+        let hasCRLF = content.contains("\r\n")
+        let lineEnding = hasCRLF ? "\r\n" : "\n"
+
         // Normalize CRLF -> LF
         content = content.replacingOccurrences(of: "\r\n", with: "\n")
 
+        let isReadOnly = !FileManager.default.isWritableFile(atPath: url.path)
         let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         let stats: [String: Any] = [
             "size": contentData.count,
-            "mtime": mtime * 1000.0
+            "mtime": mtime * 1000.0,
+            "revision": SHA256.hash(data: rawData).map { String(format: "%02x", $0) }.joined(),
+            "hasBOM": hasBOM,
+            "lineEnding": lineEnding,
+            "isReadOnly": isReadOnly
         ]
 
         // Start file watcher for live reload on modification
@@ -201,6 +425,9 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
     }
 
     private func handleWriteFile(id: String, payload: [String: Any]) {
+        // Serialize app writes so a delayed save cannot overwrite a newer app revision.
+        writeLock.lock()
+        defer { writeLock.unlock() }
         guard let filePath = payload["filePath"] as? String, !filePath.isEmpty,
               let content = payload["content"] as? String else {
             sendResponse(id: id, result: ["success": false, "error": "无效的文件路径或内容"])
@@ -227,9 +454,36 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
             return
         }
 
-        guard let data = content.data(using: .utf8) else {
+        let isReadOnly = !FileManager.default.isWritableFile(atPath: url.path)
+        if FileManager.default.fileExists(atPath: url.path) && isReadOnly {
+            sendResponse(id: id, result: ["success": false, "error": "文件在磁盘上为只读，无法直接写入。请使用“另存为”保存副本。"])
+            return
+        }
+
+        var textToWrite = content
+        let lineEnding = payload["lineEnding"] as? String ?? "\n"
+        if lineEnding == "\r\n" {
+            textToWrite = textToWrite.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\n", with: "\r\n")
+        }
+
+        guard var data = textToWrite.data(using: .utf8) else {
             sendResponse(id: id, result: ["success": false, "error": "编码转换失败"])
             return
+        }
+
+        let hasBOM = payload["hasBOM"] as? Bool ?? false
+        if hasBOM {
+            var bomData = Data([0xEF, 0xBB, 0xBF])
+            bomData.append(data)
+            data = bomData
+        }
+
+        if let expectedRevision = payload["expectedRevision"] as? String {
+            guard let currentData = try? Data(contentsOf: url),
+                  SHA256.hash(data: currentData).map({ String(format: "%02x", $0) }).joined() == expectedRevision else {
+                sendResponse(id: id, result: ["success": false, "error": "文件已在外部修改或无法读取，保存已停止；当前修改仍保留"])
+                return
+            }
         }
 
         // Suppress watcher before writing to prevent self-reload loop
@@ -243,7 +497,8 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
                 "success": true,
                 "stats": [
                     "size": data.count,
-                    "mtime": mtime * 1000.0
+                    "mtime": mtime * 1000.0,
+                    "revision": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
                 ]
             ])
         } catch {
@@ -307,7 +562,7 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
             return
         }
 
-        let nodes = scanDirectory(url: url, depth: 0, maxDepth: 4)
+        let nodes = scanDirectory(url: url, depth: 0, maxDepth: 2)
         sendResponse(id: id, result: [
             "success": true,
             "nodes": nodes
@@ -315,7 +570,7 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
     }
 
     private func scanDirectory(url: URL, depth: Int, maxDepth: Int) -> [[String: Any]] {
-        guard depth < maxDepth else { return [] }
+        guard depth < min(maxDepth, 2) else { return [] }
 
         let keys: [URLResourceKey] = [.isDirectoryKey, .nameKey]
         let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles]

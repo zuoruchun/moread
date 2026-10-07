@@ -1,9 +1,10 @@
 {
   "name": "moread",
-  "version": "1.4.0",
+  "version": "1.5.1",
   "description": "墨读 MoRead - 个人自用 macOS Markdown 阅读器 (Swift/AppKit + WKWebView)",
   "author": "Ruchun Zuo",
   "scripts": {
+    "test:pdf": "npm run build:web && swiftc -parse-as-library -module-cache-path /tmp/moread-pdf-module-cache -target arm64-apple-macos14.0 -framework Cocoa -framework WebKit -framework PDFKit -framework UniformTypeIdentifiers src-native/PDFExporter.swift src-native/LocalFileSchemeHandler.swift tests/native/TestPDFExport.swift -o /tmp/moread-pdf-tests && /tmp/moread-pdf-tests \"$PWD/dist-renderer\" \"$PWD/_codex_sessions/MoReadBugs/tmp/pdfs/regression\"",
     "dev": "vite",
     "build:web": "tsc && vite build",
     "build": "./build-native.sh",

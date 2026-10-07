@@ -10,6 +10,7 @@ public final class MainWindowController: @unchecked Sendable {
     public func beginWindowDrag() {}
     public func forceCloseWindow() {}
     public func allowLocalResources(forDocument path: String) {}
+    public func exportPDF(completion: (([String: Any]) -> Void)? = nil) { completion?(["success": false, "cancelled": true]) }
 }
 #endif
 
@@ -19,7 +20,7 @@ public final class MainWindowController: @unchecked Sendable {
 final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandler {
     var window: NSWindow!
     var webView: WKWebView!
-    var settings: [String: Any] = ["theme": "system", "fontSize": 16, "showSidebar": false, "recentFiles": []]
+    var settings: [String: Any] = ["theme": "system", "fontSize": 16, "showSidebar": false, "recentFiles": [], "openMode": "edit"]
     let fixtures = FileManager.default.temporaryDirectory.appendingPathComponent("moread-renderer-\(UUID().uuidString)")
     var completed = false
     var phase = 0
@@ -28,6 +29,9 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
 #if MOREAD_BRIDGE_INTEGRATION
     let productionBridge = NativeBridge()
     let productionHost = MainWindowController()
+    let usingProductionBridge = true
+#else
+    let usingProductionBridge = false
 #endif
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -36,6 +40,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             try "# 1\\. **第一节**\n\n正文\n\n## 2\\. 第二节\n\n## 3\\. 第三节".write(to: fixtures.appendingPathComponent("未命名.md"), atomically: true, encoding: .utf8)
             try FileManager.default.createDirectory(at: fixtures.appendingPathComponent("nested"), withIntermediateDirectories: true)
             try "# 子目录".write(to: fixtures.appendingPathComponent("nested/另一个.md"), atomically: true, encoding: .utf8)
+            try "# 自动保存测试\n".write(to: fixtures.appendingPathComponent("自动保存.md"), atomically: true, encoding: .utf8)
             try #"""
             # 代码编辑测试
 
@@ -52,6 +57,16 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
 
             ```not-a-language
             <script>window.__codeExecuted = true</script>
+            ```
+
+            ```text
+            first
+
+
+            ```
+
+            ```text
+
             ```
             """#.write(to: fixtures.appendingPathComponent("代码.md"), atomically: true, encoding: .utf8)
         } catch { finish(false, "Fixture setup: \(error)"); return }
@@ -156,7 +171,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
                 self.webView.evaluateJavaScript("""
                 (() => {
                   const a = window.moreadApp;
-                  const ok = a.currentSettings.theme === 'dark' && a.settingsFontSizeEl.value === '20' && a.selectWidthEl.value === 'wide' && a.filesTabBtn.classList.contains('active') && a.btnToggleSidebarEl.getAttribute('aria-expanded') === 'true';
+                  const ok = a.currentSettings.theme === 'dark' && a.settingsFontSizeEl.value === '20' && a.selectWidthEl.value === 'wide' && a.selectSaveModeEl.value === 'auto' && a.filesTabBtn.classList.contains('active') && a.btnToggleSidebarEl.getAttribute('aria-expanded') === 'true';
                   window.webkit.messageHandlers.testResult.postMessage({success: ok, detail: ok ? 'PASS: \(passedChecks + 1) renderer checks, including code editing/copy/save/undo and reload persistence' : 'Settings/sidebar persistence failed'});
                 })()
                 """)
@@ -175,7 +190,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             const check = (ok, message) => { if (!ok) throw new Error(message); checks++; };
             const click = id => document.getElementById(id).click();
             check(document.querySelectorAll('.header-left button').length === 1, 'One sidebar button');
-            check(document.querySelectorAll('.header-right button').length === 2 && !document.querySelector('.header-right select') && !document.getElementById('btn-settings') && !document.getElementById('btn-font-increase') && !document.querySelector('.status-left button'), 'Toolbar cleanup');
+            check(document.querySelectorAll('.header-right button').length === 3 && !document.querySelector('.header-right select') && !document.getElementById('btn-settings') && !document.getElementById('btn-font-increase') && !document.querySelector('.status-left button'), 'Toolbar cleanup');
             await a.loadFile(root + '/未命名.md');
             check(a.docTitleEl.textContent === '未命名.md' && a.filesContentEl.textContent.includes('未命名.md'), 'Standalone file list');
             click('btn-toggle-sidebar'); click('tab-files'); click('btn-toggle-sidebar'); click('btn-toggle-sidebar');
@@ -201,7 +216,13 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             check(a.filesContentEl.textContent.includes('未命名.md') && a.filesContentEl.textContent.includes('另一个.md'), 'Nested file keeps folder root and expands');
             await a.loadFile(root + '/代码.md');
             const blocks = [...a.markdownBodyEl.querySelectorAll('.code-block-container')];
-            check(blocks.length === 3 && blocks.every(b => b.querySelector('input.code-lang') && b.querySelector('textarea.code-editor')), 'Editable code controls survive DOMPurify');
+            check(blocks.length === 5 && blocks.every(b => b.querySelector('input.code-lang') && b.querySelector('textarea.code-editor')), 'Editable code controls survive DOMPurify');
+            const expectedLines = [4, 1, 1, 3, 1];
+            check(blocks.every((b, i) => {
+              const display = b.querySelector('pre code');
+              return Math.abs(display.getBoundingClientRect().height - parseFloat(getComputedStyle(display).lineHeight) * expectedLines[i]) < 1;
+            }), 'Code display height has no fence separator row and preserves genuine blank rows');
+            check(blocks[1].querySelector('textarea').value === 'print("second block")' && blocks[3].querySelector('textarea').value === 'first\\n\\n' && blocks[4].querySelector('textarea').value === '', 'Input values exclude only the closing fence separator');
             let code = blocks[0].querySelector('pre code'), language = blocks[0].querySelector('input.code-lang');
             let editor = blocks[0].querySelector('textarea.code-editor');
             editor.scrollIntoView({block:'center'});
@@ -237,14 +258,15 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             check(copied === editedCode, 'Copy reads edited code, not stale cache');
             check(await a.saveCurrentFile(), 'Rendered code save succeeds');
             const saved = await api.readFile(root + '/代码.md');
-            check(saved.content.includes('```py\\n' + editedCode + '```') && saved.content.includes('print("second block")') && !saved.content.includes('代码语言') && !a.isEdited, 'Saved file preserves language, code, trailing lines and neighboring blocks');
+            check(saved.content.includes('```py\\n' + editedCode + '\\n```') && saved.content.includes('print("second block")') && !saved.content.includes('代码语言') && !a.isEdited, 'Saved file preserves language, code, trailing lines and neighboring blocks');
             click('btn-toggle-source');
-            check(a.sourceTextareaEl.value.includes('```py\\n' + editedCode + '```'), 'Code edits survive switching to source');
+            check(a.sourceTextareaEl.value.includes('```py\\n' + editedCode + '\\n```'), 'Code edits survive switching to source');
             click('btn-toggle-source');
             code = a.markdownBodyEl.querySelector('.code-block-container pre code');
             language = a.markdownBodyEl.querySelector('input.code-lang');
             editor = a.markdownBodyEl.querySelector('textarea.code-editor');
             check(editor.value === editedCode && language.value === 'py', 'Source roundtrip preserves edited code');
+            check(Math.abs(code.getBoundingClientRect().height - parseFloat(getComputedStyle(code).lineHeight) * editedCode.split('\\n').length) < 1, 'Edited trailing blank rows keep input and display geometry aligned');
             editor.focus(); editor.setSelectionRange(editor.value.length, editor.value.length);
             editor.dispatchEvent(new KeyboardEvent('keydown', {key:'Tab',bubbles:true,cancelable:true}));
             document.execCommand('insertText', false, '\\n');
@@ -262,6 +284,75 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             click('btn-toggle-source');
             check(a.sourceTextareaEl.value.includes('```\\n' + longLine), 'Clearing language produces an unlabelled fence');
             click('btn-toggle-source');
+            await a.loadFile(root + '/自动保存.md');
+            if (!a.isSourceMode) click('btn-toggle-source');
+            const wait = ms => new Promise(r => setTimeout(r, ms));
+            const waitFor = async predicate => {
+              for (let i = 0; i < 80; i++) {
+                if (predicate()) return;
+                await wait(50);
+              }
+            };
+            const realWrite = api.writeFile;
+            let writes = 0;
+            api.writeFile = async (...args) => { writes++; return realWrite(...args); };
+            const setSaveMode = mode => { a.selectSaveModeEl.value = mode; a.selectSaveModeEl.dispatchEvent(new Event('change')); };
+            const typeSource = value => { a.sourceTextareaEl.value = value; a.sourceTextareaEl.dispatchEvent(new InputEvent('input', {bubbles:true,data:value})); };
+            check(a.selectSaveModeEl.value === 'manual', 'Save mode defaults to manual for existing settings');
+            typeSource('# 手动修改\\n'); await wait(1150);
+            check(writes === 0 && a.isEdited && (await api.readFile(root + '/自动保存.md')).content === '# 自动保存测试\\n', 'Manual mode never writes on input');
+            check(await a.saveCurrentFile() && writes === 1 && !a.isEdited, 'Manual save works with save setting');
+            await a.saveCurrentFile(); check(writes === 1, 'Unmodified save does not rewrite the file');
+            setSaveMode('auto');
+            typeSource('# 自动修改一\\n'); await wait(300); typeSource('# 自动修改二\\n'); await wait(700);
+            check(writes === 1 && a.isEdited, 'Auto save waits for idle after the latest edit');
+            await waitFor(() => writes === 2 && !a.isEdited);
+            check(writes === 2 && !a.isEdited && (await api.readFile(root + '/自动保存.md')).content === '# 自动修改二\\n', 'Auto save writes latest source through real filesystem bridge');
+            typeSource('# 等待手动保存\\n'); setSaveMode('manual'); await wait(1150);
+            check(writes === 2 && a.isEdited, 'Switching to manual cancels a pending auto save');
+            check(await a.saveCurrentFile(), 'Manual save remains available after disabling auto save');
+            setSaveMode('auto');
+            a.sourceTextareaEl.dispatchEvent(new CompositionEvent('compositionstart', {bubbles:true,data:'中'}));
+            typeSource('# 中文输入\\n'); const beforeComposition = writes; await wait(1150);
+            check(writes === beforeComposition && a.isEdited, 'No automatic write during unfinished composition');
+            a.sourceTextareaEl.dispatchEvent(new CompositionEvent('compositionend', {bubbles:true,data:'中文'})); await waitFor(() => writes === beforeComposition + 1 && !a.isEdited);
+            check(writes === beforeComposition + 1 && !a.isEdited, 'Automatic write resumes after composition ends');
+            let failures = 0;
+            api.writeFile = async () => { failures++; return {success:false,error:'Test save denied'}; };
+            typeSource('# 必须保留\\n'); await waitFor(() => failures === 1 && a.errorBannerEl.textContent.includes('Test save denied'));
+            check(failures === 1 && a.isEdited && a.errorBannerEl.textContent.includes('Test save denied'), 'Failed auto save keeps local edits and displays error: ' + JSON.stringify({failures,edited:a.isEdited,error:a.errorBannerEl.textContent,paused:a.autoSavePaused}));
+            typeSource('# 继续保留\\n'); await wait(1150);
+            check(failures === 1 && a.isEdited, 'Failure pauses automatic retries');
+            const confirmSave = api.confirmSaveDialog, closeWindow = api.closeWindow;
+            let closed = false;
+            api.confirmSaveDialog = async () => ({action:'save'});
+            api.closeWindow = async () => { closed = true; return {success:true}; };
+            await a.loadFile(root + '/未命名.md'); await a.handleRequestClose();
+            check(a.currentFilePath === root + '/自动保存.md' && a.sourceTextareaEl.value === '# 继续保留\\n' && !closed, 'Failed save blocks file switching and window closing');
+            api.confirmSaveDialog = confirmSave; api.closeWindow = closeWindow;
+            api.writeFile = realWrite;
+            check(await a.saveCurrentFile() && !a.isEdited, 'Manual retry recovers after auto save failure');
+            click('btn-toggle-source');
+            const autoHeading = a.markdownBodyEl.querySelector('h1');
+            autoHeading.textContent = '渲染自动保存'; autoHeading.dispatchEvent(new InputEvent('input', {bubbles:true,data:'渲染自动保存'}));
+            await waitFor(() => !a.isEdited);
+            check(!a.isEdited && (await api.readFile(root + '/自动保存.md')).content === '# 渲染自动保存\\n', 'Rendered text auto save uses live DOM');
+            click('btn-toggle-source');
+            typeSource('# 代码自动保存\\n\\n```python\\nprint(1)\\n```\\n'); click('btn-toggle-source');
+            const autoCode = a.markdownBodyEl.querySelector('textarea.code-editor');
+            autoCode.value = 'print("自动保存")'; autoCode.dispatchEvent(new InputEvent('input', {bubbles:true,data:'自动保存'}));
+            await waitFor(() => !a.isEdited);
+            check(!a.isEdited && (await api.readFile(root + '/自动保存.md')).content.includes('```python\\nprint("自动保存")\\n```'), 'Rendered code auto save preserves live code and fence separator');
+            click('btn-toggle-source');
+            if (\(usingProductionBridge)) {
+              const diskBefore = await api.readFile(root + '/自动保存.md');
+              const staleWrite = await api.writeFile(root + '/自动保存.md', '# must not overwrite', 'stale-revision');
+              check(!staleWrite.success && (await api.readFile(root + '/自动保存.md')).content === diskBefore.content, 'Native fingerprint guard rejects stale disk revision');
+            }
+            typeSource('# 本地未保存\\n');
+            await realWrite(root + '/自动保存.md', '# 外部更新\\n'); await wait(1450);
+            check(a.isEdited && a.sourceTextareaEl.value === '# 本地未保存\\n' && (await api.readFile(root + '/自动保存.md')).content === '# 外部更新\\n', 'Automatic save never overwrites detected external changes');
+            api.writeFile = realWrite;
             await a.loadFile(root + '/未命名.md');
             a.handleMenuAction('settings');
             check(a.settingsDialogEl.open, 'Settings opens');

@@ -1,15 +1,13 @@
 import Foundation
 
 public final class FileWatcher: @unchecked Sendable {
-    private var source: DispatchSourceFileSystemObject?
-    private var fileDescriptor: Int32 = -1
+    private var sources: [String: DispatchSourceFileSystemObject] = [:]
+    private var fileDescriptors: [String: Int32] = [:]
     private let queue = DispatchQueue(label: "com.moread.filewatcher", qos: .utility)
-    private var debounceWorkItem: DispatchWorkItem?
-    private var currentFilePath: String?
+    private var debounceWorkItems: [String: DispatchWorkItem] = [:]
     private let onChange: (String) -> Void
     private var isStopped = false
-    private var suppressedPath: String?
-    private var suppressedUntil: Date?
+    private var suppressedPaths: [String: Date] = [:]
 
     public init(onChange: @escaping (String) -> Void) {
         self.onChange = onChange
@@ -21,16 +19,25 @@ public final class FileWatcher: @unchecked Sendable {
 
     public func suppressNextChange(for path: String, duration: TimeInterval = 1.5) {
         queue.async { [weak self] in
-            self?.suppressedPath = path
-            self?.suppressedUntil = Date().addingTimeInterval(duration)
+            self?.suppressedPaths[path] = Date().addingTimeInterval(duration)
         }
     }
 
     public func watch(filePath: String) {
-        stop()
-        isStopped = false
-        currentFilePath = filePath
-        startWatching(path: filePath)
+        queue.async { [weak self] in
+            guard let self = self, !self.isStopped else { return }
+            if self.sources[filePath] != nil {
+                return // Already watching
+            }
+            self.startWatching(path: filePath)
+        }
+    }
+
+    public func unwatch(filePath: String) {
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.stopWatching(path: filePath)
+        }
     }
 
     private func startWatching(path: String) {
@@ -40,7 +47,7 @@ public final class FileWatcher: @unchecked Sendable {
         guard descriptor >= 0 else {
             return
         }
-        fileDescriptor = descriptor
+        fileDescriptors[path] = descriptor
 
         let src = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: descriptor,
@@ -63,23 +70,32 @@ public final class FileWatcher: @unchecked Sendable {
         src.setCancelHandler { [weak self] in
             close(descriptor)
             guard let self = self else { return }
-            if self.fileDescriptor == descriptor {
-                self.fileDescriptor = -1
+            if self.fileDescriptors[path] == descriptor {
+                self.fileDescriptors.removeValue(forKey: path)
             }
         }
 
-        self.source = src
+        sources[path] = src
         src.resume()
+    }
+
+    private func stopWatching(path: String) {
+        debounceWorkItems[path]?.cancel()
+        debounceWorkItems.removeValue(forKey: path)
+        if let src = sources.removeValue(forKey: path) {
+            src.cancel()
+        }
+        fileDescriptors.removeValue(forKey: path)
+        suppressedPaths.removeValue(forKey: path)
     }
 
     private func rearmWatcherAfterAtomicSave(path: String) {
         // Many text editors write to a temporary file and atomically rename it.
         // Wait 100ms for filesystem to settle, then rebind descriptor.
         queue.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self = self, !self.isStopped, self.currentFilePath == path else { return }
-            if let existingSource = self.source {
+            guard let self = self, !self.isStopped, self.sources[path] != nil else { return }
+            if let existingSource = self.sources.removeValue(forKey: path) {
                 existingSource.cancel()
-                self.source = nil
             }
             if FileManager.default.fileExists(atPath: path) {
                 self.startWatching(path: path)
@@ -88,13 +104,10 @@ public final class FileWatcher: @unchecked Sendable {
     }
 
     private func scheduleDebouncedNotification(path: String) {
-        debounceWorkItem?.cancel()
+        debounceWorkItems[path]?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self, !self.isStopped else { return }
-            if let suppressed = self.suppressedPath,
-               let until = self.suppressedUntil,
-               suppressed == path,
-               Date() < until {
+            if let until = self.suppressedPaths[path], Date() < until {
                 // Suppress notification triggered by app's own save
                 return
             }
@@ -102,19 +115,24 @@ public final class FileWatcher: @unchecked Sendable {
                 self.onChange(path)
             }
         }
-        debounceWorkItem = workItem
+        debounceWorkItems[path] = workItem
         queue.asyncAfter(deadline: .now() + 0.2, execute: workItem)
     }
 
     public func stop() {
-        isStopped = true
-        debounceWorkItem?.cancel()
-        debounceWorkItem = nil
-        currentFilePath = nil
-        if let src = source {
-            fileDescriptor = -1
-            src.cancel()
-            source = nil
+        queue.sync { [weak self] in
+            guard let self = self else { return }
+            self.isStopped = true
+            for (_, item) in self.debounceWorkItems {
+                item.cancel()
+            }
+            self.debounceWorkItems.removeAll()
+            for (_, src) in self.sources {
+                src.cancel()
+            }
+            self.sources.removeAll()
+            self.fileDescriptors.removeAll()
+            self.suppressedPaths.removeAll()
         }
     }
 }

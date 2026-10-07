@@ -24,13 +24,19 @@
       </div>
 
       <div class="header-right">
+        <!-- Edit Mode Toggle -->
+        <button id="btn-toggle-edit" class="btn-icon" title="切换阅读 / 编辑模式 (Cmd+E)">编辑</button>
+
         <!-- Source View Toggle -->
-        <button id="btn-toggle-source" class="btn-icon" title="切换编辑模式 (Cmd+Shift+S)">源码</button>
+        <button id="btn-toggle-source" class="btn-icon" title="切换源码 / 渲染 (Cmd+Shift+S)">源码</button>
 
         <!-- Search Button -->
         <button id="btn-search" class="btn-icon" title="在文档内查找 (Cmd+F)">🔍</button>
       </div>
     </header>
+
+    <!-- Tab Bar -->
+    <div id="tab-bar" class="tab-bar" role="tablist" aria-label="文档标签页"></div>
 
     <!-- Workspace -->
     <div class="app-workspace">
@@ -59,6 +65,16 @@
           <button id="btn-search-close" class="btn-icon" title="关闭 (Esc)">✕</button>
         </div>
 
+        <!-- Conflict Banner -->
+        <div id="conflict-banner" class="conflict-banner hidden" style="display: none;">
+          <span id="conflict-message" class="conflict-message">文件已被外部程序修改，本地有未保存的修改。</span>
+          <div class="conflict-actions">
+            <button id="btn-conflict-keep" class="btn-secondary btn-sm" title="保留当前本地修改，继续编辑">保留本地修改</button>
+            <button id="btn-conflict-reload" class="btn-secondary btn-sm" title="放弃当前本地修改，重新读取磁盘版本">读取外部版本</button>
+            <button id="btn-conflict-copy" class="btn-primary btn-sm" title="将本地修改另存为一个新文件副本">另存副本...</button>
+          </div>
+        </div>
+
         <!-- Error Banner -->
         <div id="error-banner" class="error-banner hidden" style="display: none;"></div>
 
@@ -85,7 +101,7 @@
         <!-- Rendered Markdown Body -->
         <div id="markdown-scroll-wrapper" class="markdown-scroll-wrapper hidden" style="display: none;">
           <div id="markdown-body-wrapper" class="markdown-body-wrapper width-standard">
-            <article id="markdown-body" class="markdown-body" contenteditable="true" spellcheck="false"></article>
+            <article id="markdown-body" class="markdown-body" contenteditable="false" spellcheck="false"></article>
           </div>
         </div>
 
@@ -96,32 +112,83 @@
       </main>
     </div>
 
+    <!-- Image Lightbox Modal -->
+    <div id="image-lightbox" class="image-lightbox hidden" style="display: none;">
+      <div class="lightbox-backdrop" id="lightbox-backdrop"></div>
+      <div class="lightbox-container">
+        <img id="lightbox-img" class="lightbox-img" src="" alt="放大预览">
+        <button id="btn-lightbox-close" class="btn-icon lightbox-close" title="关闭 (Esc)">✕</button>
+      </div>
+    </div>
+
     <!-- Status Bar -->
     <footer class="app-status-bar">
       <div class="status-left">
-        <span id="status-mode" class="status-mode">[所见即所得]</span>
+        <span id="status-mode" class="status-mode">[阅读模式]</span>
         <span id="status-save-badge" class="status-save-badge" style="display: none;">[已保存]</span>
         <span id="status-encoding">UTF-8</span>
         <span id="status-file-size">-</span>
       </div>
       <div class="status-right">
         <span id="status-stats">0 字符 · 0 行</span>
-        <span>MoRead v1.4.0</span>
+        <span>MoRead v1.5.0</span>
       </div>
     </footer>
   </div>
 
   <dialog id="reading-settings" class="settings-dialog" aria-labelledby="settings-title">
     <div class="settings-heading"><h2 id="settings-title">设置</h2><button id="btn-close-settings" class="btn-icon" aria-label="关闭设置">✕</button></div>
-    <label class="settings-row" for="select-theme">显示主题
-      <select id="select-theme" class="select-native"><option value="system">跟随系统</option><option value="light">浅色模式</option><option value="dark">深色模式</option></select>
-    </label>
-    <label class="settings-row" for="settings-font-size">正文字号
-      <span><input id="settings-font-size" class="select-native" type="number" min="12" max="28" step="1" value="16"> px</span>
-    </label>
-    <label class="settings-row" for="select-reading-width">阅读宽度
-      <select id="select-reading-width" class="select-native"><option value="compact">紧凑宽 (700px)</option><option value="standard" selected>标准宽 (860px)</option><option value="wide">宽松宽 (1100px)</option><option value="full">全宽度 (100%)</option></select>
-    </label>
+
+    <section class="settings-section">
+      <h3 class="settings-section-title">阅读与视图</h3>
+      <label class="settings-row" for="select-open-mode">打开文件时
+        <select id="select-open-mode" class="select-native">
+          <option value="read" selected>阅读模式（默认）</option>
+          <option value="edit">编辑模式</option>
+        </select>
+      </label>
+      <label class="settings-row" for="select-theme">显示主题
+        <select id="select-theme" class="select-native"><option value="system">跟随系统</option><option value="light">浅色模式</option><option value="dark">深色模式</option></select>
+      </label>
+      <label class="settings-row" for="settings-font-size">正文字号
+        <span><input id="settings-font-size" class="select-native" type="number" min="12" max="28" step="1" value="16"> px</span>
+      </label>
+      <label class="settings-row" for="select-reading-width">阅读宽度
+        <select id="select-reading-width" class="select-native"><option value="compact">紧凑宽 (700px)</option><option value="standard" selected>标准宽 (860px)</option><option value="wide">宽松宽 (1100px)</option><option value="full">全宽度 (100%)</option></select>
+      </label>
+    </section>
+
+    <section class="settings-section">
+      <h3 class="settings-section-title">保存与安全</h3>
+      <label class="settings-row" for="select-save-mode">保存方式
+        <select id="select-save-mode" class="select-native"><option value="manual">手动保存 (Cmd+S)</option><option value="auto">自动保存</option></select>
+      </label>
+      <div class="settings-row">
+        <span>本地恢复草稿</span>
+        <button id="btn-clear-drafts" class="btn-secondary" style="font-size: 12px; padding: 4px 10px;">清理所有草稿</button>
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <h3 class="settings-section-title">网络与隐私</h3>
+      <label class="settings-row" for="select-remote-images">网络图片
+        <select id="select-remote-images" class="select-native">
+          <option value="block" selected>默认拦截（隐私保护）</option>
+          <option value="allow">允许加载所有网络图片</option>
+        </select>
+      </label>
+    </section>
+  </dialog>
+
+  <!-- Draft Recovery Dialog -->
+  <dialog id="draft-recovery-dialog" class="settings-dialog" aria-labelledby="draft-recovery-title">
+    <div class="settings-heading"><h2 id="draft-recovery-title">恢复未保存草稿</h2><button id="btn-close-drafts" class="btn-icon" aria-label="关闭">✕</button></div>
+    <p class="settings-save-hint" style="margin-top: 4px; font-size: 13px;">检测到上次应用退出前保存的文档恢复草稿：</p>
+    <ul id="draft-recovery-list" class="recent-list" style="max-height: 200px; overflow-y: auto; margin: 12px 0;"></ul>
+    <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px;">
+      <button id="btn-discard-drafts" class="btn-secondary">丢弃草稿</button>
+      <button id="btn-recover-drafts" class="btn-primary">恢复草稿</button>
+    </div>
   </dialog>
 
   <script type="module" src="./main.ts"></script>

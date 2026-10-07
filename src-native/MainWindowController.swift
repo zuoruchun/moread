@@ -58,8 +58,10 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
     private var isWebContentLoaded = false
     private var isRendererReady = false
     private var pendingOpenFilePaths: [String] = []
+    public private(set) var currentFolderPath: String?
 
-    public init() {
+    public init(initialFolderPath: String? = nil) {
+        self.currentFolderPath = initialFolderPath
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1040, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -75,6 +77,10 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
         super.init(window: window)
         window.delegate = self
         restoreWindowFrame()
+
+        if let initialFolderPath = initialFolderPath {
+            nativeBridge.authorizeDirectory(initialFolderPath)
+        }
 
         setupWebView()
         setupDragAndDrop()
@@ -226,11 +232,74 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
         if let window = self.window {
             panel.beginSheetModal(for: window) { [weak self] response in
                 if response == .OK, let url = panel.url {
+                    self?.currentFolderPath = url.path
                     self?.nativeBridge.authorizeDirectory(url.path)
                     self?.nativeBridge.notifyOpenFolder(url.path)
                 }
             }
         }
+    }
+
+    private var pdfExporter: PDFExporter?
+    private var pdfExportInProgress = false
+
+    public func exportPDF(completion: (([String: Any]) -> Void)? = nil) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window else {
+                completion?(["success": false, "error": "窗口已关闭"])
+                return
+            }
+            guard !self.pdfExportInProgress else {
+                completion?(["success": false, "error": "已有 PDF 导出正在进行"])
+                return
+            }
+            self.pdfExportInProgress = true
+            // Capture once before the save panel: tab switches or later edits cannot change this export.
+            self.webView.evaluateJavaScript("window.moreadApp?.prepareForPDFExport() ?? null") { [weak self] value, error in
+                guard let self else { completion?(["success": false, "error": "窗口已关闭"]); return }
+                guard error == nil, let snapshot = value as? [String: Any], let html = snapshot["html"] as? String else {
+                    self.pdfExportInProgress = false
+                    let message = error?.localizedDescription ?? "请先打开需要导出的 Markdown 文档"
+                    completion?(["success": false, "error": message])
+                    self.showPDFError(message)
+                    return
+                }
+                let panel = NSSavePanel()
+                panel.title = "导出为 PDF（A4 自动分页）"
+                panel.allowedContentTypes = [UTType.pdf]
+                panel.canCreateDirectories = true
+                let title = ((snapshot["title"] as? String ?? "未命名") as NSString).lastPathComponent
+                panel.nameFieldStringValue = "\((title as NSString).deletingPathExtension).pdf"
+                panel.beginSheetModal(for: window) { [weak self] response in
+                    guard let self else { completion?(["success": false, "error": "窗口已关闭"]); return }
+                    guard response == .OK, let url = panel.url else {
+                        self.pdfExportInProgress = false
+                        completion?(["success": false, "cancelled": true])
+                        return
+                    }
+                    let exporter = PDFExporter()
+                    self.pdfExporter = exporter
+                    exporter.export(html: html, filePath: snapshot["filePath"] as? String, to: url) { [weak self] result in
+                        self?.pdfExporter = nil
+                        self?.pdfExportInProgress = false
+                        switch result {
+                        case .success: completion?(["success": true])
+                        case .failure(let error):
+                            completion?(["success": false, "error": error.localizedDescription])
+                            self?.showPDFError(error.localizedDescription)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func showPDFError(_ message: String) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.messageText = "无法导出 PDF"
+        alert.informativeText = message
+        alert.beginSheetModal(for: window)
     }
 
     public func zoomIn() {
@@ -274,7 +343,11 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
     }
 
     private func flushPendingOpenFilesIfReady() {
-        guard isWebContentLoaded && isRendererReady && !pendingOpenFilePaths.isEmpty else { return }
+        guard isWebContentLoaded && isRendererReady else { return }
+        if let folder = currentFolderPath {
+            nativeBridge.notifyOpenFolder(folder)
+        }
+        guard !pendingOpenFilePaths.isEmpty else { return }
         let pending = pendingOpenFilePaths
         pendingOpenFilePaths.removeAll()
         pending.forEach(nativeBridge.notifyOpenFile)
@@ -290,6 +363,9 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
 
     public func windowWillClose(_ notification: Notification) {
         saveWindowFrame()
+        if let appDelegate = NSApp.delegate as? AppDelegate {
+            appDelegate.removeWindowController(self)
+        }
     }
 
     private func restoreWindowFrame() {

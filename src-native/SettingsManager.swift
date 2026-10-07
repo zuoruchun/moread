@@ -86,6 +86,8 @@ public final class SettingsManager: @unchecked Sendable {
             "theme": "system",
             "readingWidth": "standard",
             "fontSize": 16,
+            "saveMode": "manual",
+            "openMode": "read",
             "recentFiles": [],
             "showSidebar": false,
             "allowRemoteImages": false
