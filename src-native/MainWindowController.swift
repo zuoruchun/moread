@@ -166,6 +166,7 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
 
     public func presentWindow() {
         showWindow(nil)
+        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

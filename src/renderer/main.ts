@@ -52,6 +52,8 @@ export class MoReadApp {
   private saveInFlight: Promise<boolean> | null = null;
   private scrollPositions: Record<string, number> = {};
   private draftTimeout: ReturnType<typeof setTimeout> | null = null;
+  private reloadRequests = new WeakMap<DocumentTab, object>();
+  private contentRenderGeneration = 0;
 
   // Controllers
   public outlineController!: OutlineController;
@@ -386,8 +388,7 @@ export class MoReadApp {
       if (ok) {
         this.conflictBannerEl.classList.add('hidden');
         this.conflictBannerEl.style.display = 'none';
-        this.activeTab.isEdited = false;
-        await this.reloadTabFromDisk(this.activeTab);
+        await this.reloadTabFromDisk(this.activeTab, true);
       }
     });
 
@@ -696,6 +697,7 @@ export class MoReadApp {
   }
 
   private renderActiveTabContent(): void {
+    const generation = ++this.contentRenderGeneration;
     const tab = this.activeTab;
     if (!tab) {
       this.showWelcomeScreen();
@@ -747,8 +749,15 @@ export class MoReadApp {
 
     // Restore scroll position
     if (typeof requestAnimationFrame === 'function') {
+      const sourceMode = tab.isSourceMode;
+      const scrollEl = sourceMode ? this.sourceTextareaEl : this.markdownScrollWrapperEl;
+      const scrollTop = scrollEl.scrollTop;
       requestAnimationFrame(() => {
-        this.setScrollRatio(tab.scrollRatio || 0);
+        // Never let an older render move another tab, or undo a user's new scroll.
+        if (this.activeTab === tab && generation === this.contentRenderGeneration &&
+            tab.isSourceMode === sourceMode && scrollEl.scrollTop === scrollTop) {
+          this.setScrollRatio(tab.scrollRatio || 0);
+        }
       });
     }
 
@@ -1074,18 +1083,55 @@ export class MoReadApp {
     }
   }
 
-  private async reloadTabFromDisk(tab: DocumentTab): Promise<void> {
+  private async reloadTabFromDisk(tab: DocumentTab, discardLocalEdits = false): Promise<void> {
     if (!tab.filePath) return;
-    const res = await window.electronAPI.readFile(tab.filePath);
-    if (res.success && res.content !== undefined) {
+    const path = tab.filePath;
+    const request = {};
+    this.reloadRequests.set(tab, request);
+    const savedContent = tab.savedContent;
+    const revision = tab.revision;
+    const editRevision = tab.editRevision;
+    try {
+      const res = await window.electronAPI.readFile(path);
+      // Reads may finish out of order, after Save As/close, or after a save.
+      if (this.reloadRequests.get(tab) !== request || !this.tabs.includes(tab) ||
+          tab.filePath !== path || this.saveInFlight ||
+          tab.savedContent !== savedContent || tab.revision !== revision) return;
+      if (!res.success || res.content === undefined) {
+        if (this.activeTab === tab) this.showError(res.error || '重新读取文件失败');
+        return;
+      }
+      const canDiscard = discardLocalEdits && tab.editRevision === editRevision;
+      if (!canDiscard && res.content === tab.savedContent) {
+        // Metadata-only and duplicate notifications must not replace the DOM.
+        tab.revision = res.stats?.revision;
+        return;
+      }
+      if (!canDiscard && (tab.isEdited || tab.editRevision !== editRevision)) {
+        tab.externalConflict = true;
+        if (this.activeTab === tab) {
+          this.conflictBannerEl.classList.remove('hidden');
+          this.conflictBannerEl.style.display = 'flex';
+        }
+        this.pauseAutoSave('文件已被外部修改，自动保存已暂停；请先处理冲突。');
+        return;
+      }
+      const contentChanged = res.content !== tab.rawContent || (canDiscard && tab.isEdited);
+      if (this.activeTab === tab) tab.scrollRatio = this.getScrollRatio();
       tab.rawContent = res.content;
       tab.savedContent = res.content;
       tab.isEdited = false;
       tab.revision = res.stats?.revision;
       tab.externalConflict = false;
       if (this.activeTabId === tab.id) {
-        this.renderActiveTabContent();
+        if (contentChanged) this.renderActiveTabContent();
         this.markAsSaved();
+        this.conflictBannerEl.classList.add('hidden');
+        this.conflictBannerEl.style.display = 'none';
+      }
+    } catch (error) {
+      if (this.reloadRequests.get(tab) === request && this.activeTab === tab) {
+        this.showError(`重新读取文件失败：${String(error)}`);
       }
     }
   }
@@ -1094,17 +1140,9 @@ export class MoReadApp {
     const tab = this.tabs.find((t) => t.filePath === changedPath);
     if (!tab) return;
 
-    if (!tab.isEdited && !this.saveInFlight) {
-      // Clean tab: reload automatically preserving scroll
+    if (!this.saveInFlight) {
+      // Verify actual disk content before reloading or declaring a conflict.
       void this.reloadTabFromDisk(tab);
-    } else if (!this.saveInFlight) {
-      // Dirty tab: conflict detected!
-      tab.externalConflict = true;
-      if (this.activeTabId === tab.id) {
-        this.conflictBannerEl.classList.remove('hidden');
-        this.conflictBannerEl.style.display = 'flex';
-      }
-      this.pauseAutoSave('文件已被外部修改，自动保存已暂停；请先处理冲突。');
     }
   }
 

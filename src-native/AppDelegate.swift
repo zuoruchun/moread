@@ -9,12 +9,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         activeWindowController
     }
     private var pendingOpenFilePaths: [String] = []
+    private var hasFinishedLaunching = false
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         setupMainMenu()
+        hasFinishedLaunching = true
 
-        let controller = MainWindowController()
-        windowControllers.append(controller)
+        let controller = activeWindowController ?? createWindow()
         controller.presentWindow()
 
         // Check command-line arguments for file paths to open
@@ -39,11 +40,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     public func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag || windowControllers.isEmpty {
-            menuNewWindow()
-        } else {
-            activeWindowController?.presentWindow()
-        }
+        // A hidden/minimized window is still a usable document window.
+        let controller = activeWindowController ?? createWindow()
+        controller.presentWindow()
         return true
     }
 
@@ -53,12 +52,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func openFiles(_ paths: [String]) {
         guard !paths.isEmpty else { return }
-        if let controller = activeWindowController {
-            controller.presentWindow()
-            controller.openFiles(paths)
-        } else {
+        guard hasFinishedLaunching else {
             pendingOpenFilePaths = deduplicated(pendingOpenFilePaths + paths)
+            return
         }
+        let controller = activeWindowController ?? createWindow()
+        controller.presentWindow()
+        controller.openFiles(paths)
+    }
+
+    private func createWindow(initialFolderPath: String? = nil) -> MainWindowController {
+        let controller = MainWindowController(initialFolderPath: initialFolderPath)
+        windowControllers.append(controller)
+        return controller
     }
 
     private func normalizedMarkdownPath(_ rawPath: String) -> String? {
@@ -223,8 +229,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Actions
     @objc public func menuNewWindow() {
         let currentFolder = activeWindowController?.currentFolderPath
-        let controller = MainWindowController(initialFolderPath: currentFolder)
-        windowControllers.append(controller)
+        let controller = createWindow(initialFolderPath: currentFolder)
         controller.presentWindow()
     }
 
