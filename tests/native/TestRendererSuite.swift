@@ -41,6 +41,8 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             try FileManager.default.createDirectory(at: fixtures.appendingPathComponent("nested"), withIntermediateDirectories: true)
             try "# 子目录".write(to: fixtures.appendingPathComponent("nested/另一个.md"), atomically: true, encoding: .utf8)
             try "# 自动保存测试\n".write(to: fixtures.appendingPathComponent("自动保存.md"), atomically: true, encoding: .utf8)
+            try "# 公式编辑\n\n行内 $x+1$ 文字\n\n$$\ny^2\n$$\n".write(to: fixtures.appendingPathComponent("公式.md"), atomically: true, encoding: .utf8)
+            try "# İXYZ\n\n中文 **XYZ** 和 XYZ\n\n```text\nXYZ \\\\ XYZ\n```\n\n$\\frac{x}{2}$\n\n前$x$后\n".write(to: fixtures.appendingPathComponent("查找替换.md"), atomically: true, encoding: .utf8)
             try #"""
             # 代码编辑测试
 
@@ -191,6 +193,10 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             const click = id => document.getElementById(id).click();
             check(document.querySelectorAll('.header-left button').length === 1, 'One sidebar button');
             check(document.querySelectorAll('.header-right button').length === 3 && !document.querySelector('.header-right select') && !document.getElementById('btn-settings') && !document.getElementById('btn-font-increase') && !document.querySelector('.status-left button'), 'Toolbar cleanup');
+            check(document.getElementById('btn-welcome-new-file'), 'Welcome has new file action');
+            click('btn-welcome-new-file');
+            check(a.activeTab && !a.activeTab.filePath && a.isEditMode && a.markdownBodyEl.getAttribute('contenteditable') === 'true', 'Welcome new file is immediately editable');
+            await a.closeTab(a.activeTab.id);
             await a.loadFile(root + '/未命名.md');
             check(a.docTitleEl.textContent === '未命名.md' && a.filesContentEl.textContent.includes('未命名.md'), 'Standalone file list');
             click('btn-toggle-sidebar'); click('tab-files'); click('btn-toggle-sidebar'); click('btn-toggle-sidebar');
@@ -284,6 +290,115 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             click('btn-toggle-source');
             check(a.sourceTextareaEl.value.includes('```\\n' + longLine), 'Clearing language produces an unlabelled fence');
             click('btn-toggle-source');
+            await a.loadFile(root + '/公式.md');
+            if (a.isSourceMode) click('btn-toggle-source');
+            if (!a.isEditMode) await a.toggleEditMode();
+            const formula = a.markdownBodyEl.querySelector('.math-inline-wrapper');
+            check(formula && formula.querySelector('svg'), 'Inline formula initially rendered');
+            formula.click();
+            let mathEditor = formula.querySelector('textarea.math-editor');
+            check(mathEditor && document.activeElement === mathEditor && mathEditor.value === 'x+1', 'One click edits rendered formula without source mode');
+            const newFormula = String.raw`\\frac{中文+x}{2}`;
+            mathEditor.select(); document.execCommand('insertText', false, newFormula);
+            check(a.isEdited && formula.getAttribute('data-raw-formula') === newFormula, 'Formula input marks dirty and updates serialization');
+            document.execCommand('undo');
+            check(mathEditor.value === 'x+1' && formula.getAttribute('data-raw-formula') === 'x+1', 'Formula native undo updates saved source');
+            document.execCommand('redo');
+            check(mathEditor.value === newFormula, 'Formula native redo works');
+            await new Promise(r => setTimeout(r, 250));
+            check(await a.saveCurrentFile(), 'Save after delayed formula preview while editor is open');
+            const mathSaved = await api.readFile(root + '/公式.md');
+            check(mathSaved.content.includes('$' + newFormula + '$') && !mathSaved.content.includes('math-editor') && !mathSaved.content.includes('完成'), 'Real disk contains edited LaTeX and no controls');
+            const mathDone = formula.querySelector('.math-editor-done');
+            mathEditor.dispatchEvent(new FocusEvent('blur', {relatedTarget:mathDone}));
+            mathDone.click();
+            check(!formula.querySelector('textarea') && formula.querySelector('svg'), 'Done click after textarea blur closes editor and renders preview');
+            const blockFormula = a.markdownBodyEl.querySelector('.math-block-wrapper');
+            blockFormula.click(); mathEditor = blockFormula.querySelector('textarea');
+            mathEditor.select(); document.execCommand('insertText', false, 'z=3');
+            click('btn-toggle-source');
+            check(a.isSourceMode && a.sourceTextareaEl.value.includes('z=3') && a.sourceTextareaEl.value.includes(newFormula), 'First source click preserves both formula edits');
+            click('btn-toggle-source');
+            check(a.markdownBodyEl.querySelector('.math-block-wrapper').getAttribute('data-raw-formula') === 'z=3', 'Math roundtrip preserves block source');
+            check(await a.saveCurrentFile(), 'Save both math edits');
+            await a.toggleEditMode();
+            check(!a.isEditMode, 'Finish editing responds on first call');
+            a.markdownBodyEl.querySelector('.math-inline-wrapper').click();
+            check(!a.markdownBodyEl.querySelector('textarea.math-editor'), 'Read mode cannot change a formula');
+            await a.loadFile(root + '/查找替换.md');
+            if (a.isSourceMode) click('btn-toggle-source');
+            if (!a.isEditMode) await a.toggleEditMode();
+            const search = document.getElementById('search-input'), replacement = document.getElementById('replace-input');
+            const query = text => { search.value = text; search.dispatchEvent(new Event('input')); };
+            const count = () => document.getElementById('search-count').textContent;
+            const originalSearchHTML = a.markdownBodyEl.innerHTML;
+            a.openSearch(); query('xyz');
+            check(count() === '1/5', 'Rendered search counts visible text and code only: ' + count());
+            check(CSS.highlights && CSS.highlights.get('moread-search').size === 5, 'Actual WebKit supports nonmutating visible highlights');
+            check([...CSS.highlights.get('moread-search')].every(range => range.toString() === 'XYZ'), 'Unicode search highlights original offsets');
+            check(a.markdownBodyEl.innerHTML === originalSearchHTML && !a.isEdited, 'Searching never mutates editable DOM or marks dirty');
+            query('前后'); check(count() === '无匹配', 'Search never joins text across a hidden formula boundary'); query('XYZ');
+            check(a.markdownBodyEl.getBoundingClientRect().top > document.getElementById('search-bar').getBoundingClientRect().bottom, 'Search bar does not cover the first visible result at 500px');
+            const highlightRegistry = CSS.highlights;
+            highlightRegistry.clear(); Object.defineProperty(CSS, 'highlights', {configurable:true,value:undefined});
+            a.searchController.performSearch();
+            check(document.querySelectorAll('.search-render-overlay span').length > 0 && a.markdownBodyEl.innerHTML === originalSearchHTML && !a.isEdited, 'Fallback highlight overlay is visible and never changes editable text');
+            Object.defineProperty(CSS, 'highlights', {configurable:true,value:highlightRegistry}); a.searchController.performSearch();
+            click('btn-search-next');
+            check(count() === '2/5' && [...CSS.highlights.get('moread-search-current')][0].toString() === 'XYZ', 'Next result updates persistent current highlight');
+            replacement.value = '<literal & $1>'; click('btn-search-replace');
+            check(a.isEdited && a.markdownBodyEl.textContent.includes('<literal & $1>') && !a.markdownBodyEl.querySelector('literal'), 'Rendered replacement is literal plaintext and marks dirty');
+            a.markdownBodyEl.focus(); document.execCommand('undo');
+            check(!a.markdownBodyEl.textContent.includes('<literal & $1>'), 'Rendered replacement supports native undo');
+            query(String.fromCharCode(92,92)); replacement.value = 'code-edited';
+            check(count() === '1/1', 'Rendered backslash search uses visible code ranges');
+            click('btn-search-replace');
+            check(a.markdownBodyEl.querySelector('textarea.code-editor').value.includes('code-edited'), 'Rendered code replacement updates its live editor');
+            a.markdownBodyEl.querySelector('textarea.code-editor').focus(); document.execCommand('undo');
+            check(a.markdownBodyEl.querySelector('textarea.code-editor').value.includes(String.fromCharCode(92,92)), 'Rendered code replacement has native undo');
+            query('XYZ'); replacement.value = 'ALL'; click('btn-search-replace-all');
+            check(count() === '无匹配' && a.markdownBodyEl.querySelector('strong').textContent === 'ALL' && a.markdownBodyEl.querySelector('textarea.code-editor').value.split('ALL').length === 3, 'Rendered Replace All preserves bold formatting and updates every code match');
+            for (let undo = 0; undo < 8 && count() !== '1/5'; undo++) {
+              document.execCommand('undo'); a.searchController.performSearch();
+            }
+            check(count() === '1/5' && a.markdownBodyEl.querySelector('strong').textContent === 'XYZ', 'Rendered Replace All can be fully undone across text and code editors');
+            a.searchController.close();
+            check(!CSS.highlights.has('moread-search'), 'Closing search removes decorations');
+            click('btn-toggle-source');
+            const sourceBeforeSearch = a.sourceTextareaEl.value;
+            a.openSearch(); query('XYZ');
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const searchViewport = a.sourceTextareaEl.getBoundingClientRect(), currentSourceRect = document.querySelector('.search-source-overlay mark.current').getBoundingClientRect();
+            check(currentSourceRect.top >= searchViewport.top && currentSourceRect.bottom <= searchViewport.bottom, 'Source mode restores the active search result after deferred scrolling');
+            check(count() === '1/5' && document.querySelectorAll('.search-source-overlay mark').length === 5 && document.querySelector('.search-source-overlay mark.current'), 'Source search has persistent yellow and current highlights');
+            document.documentElement.dataset.theme = 'dark';
+            check(getComputedStyle(document.querySelector('.search-source-overlay mark:not(.current)')).color === 'rgb(36, 36, 36)' && getComputedStyle(document.querySelector('.search-source-overlay mark.current')).backgroundColor === 'rgb(255, 155, 56)', 'Source highlights retain dark text on bright colors in dark theme');
+            document.documentElement.dataset.theme = 'light';
+            replacement.value = '替换😀$1'; click('btn-search-replace-all');
+            check(a.isEdited && count() === '无匹配' && !a.sourceTextareaEl.value.includes('XYZ') && a.sourceTextareaEl.value.split('替换😀$1').length === 6, 'Replace All uses literal Unicode replacement and all five source matches');
+            a.sourceTextareaEl.focus(); document.execCommand('undo');
+            check(a.sourceTextareaEl.value === sourceBeforeSearch, 'Source Replace All is one native undo operation');
+            a.searchController.performSearch(); query(String.fromCharCode(92, 92));
+            check(count() === '1/1' && document.querySelector('.search-source-overlay mark').textContent === String.fromCharCode(92,92), 'Two literal backslashes are visible and highlighted in source');
+            replacement.value = ''; click('btn-search-replace');
+            check(!a.sourceTextareaEl.value.includes(String.fromCharCode(92,92)), 'Empty replacement deletes the selected match');
+            a.sourceTextareaEl.focus(); document.execCommand('undo');
+            check(a.sourceTextareaEl.value === sourceBeforeSearch, 'Empty replacement can be undone');
+            query('XYZ');
+            a.sourceTextareaEl.dispatchEvent(new CompositionEvent('compositionstart', {bubbles:true,data:'中'}));
+            const beforeIMEReplace = a.sourceTextareaEl.value;
+            click('btn-search-replace-all');
+            check(a.sourceTextareaEl.value === beforeIMEReplace, 'Replacement is blocked during document composition');
+            a.sourceTextareaEl.dispatchEvent(new CompositionEvent('compositionend', {bubbles:true,data:'中'}));
+            check(await a.saveCurrentFile() && (await api.readFile(root + '/查找替换.md')).content === sourceBeforeSearch, 'Search/undo roundtrip saves exact real disk bytes without decorations');
+            await a.toggleEditMode(); a.searchController.refresh();
+            check(document.getElementById('btn-search-replace').disabled && document.getElementById('btn-search-replace-all').disabled, 'Read mode disables replacement');
+            const searchTab = a.activeTab;
+            const cleanTab = a.createTab({rawContent:'# B 独有标记',isEditMode:true,isSourceMode:true}); a.switchTab(cleanTab.id);
+            query('XYZ'); click('btn-search-replace-all');
+            check(count() === '无匹配' && a.sourceTextareaEl.value === '# B 独有标记' && !cleanTab.isEdited, 'Switching tabs drops all old matches before replacement');
+            await a.closeTab(cleanTab.id); a.switchTab(searchTab.id);
+            a.searchController.close();
             await a.loadFile(root + '/自动保存.md');
             if (!a.isSourceMode) click('btn-toggle-source');
             const wait = ms => new Promise(r => setTimeout(r, ms));

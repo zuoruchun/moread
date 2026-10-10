@@ -1,4 +1,23 @@
-# 墨读 MoRead - 质量验收与五轮测试报告 (QA_REPORT)
+# 墨读 MoRead - 质量验收与测试报告 (QA_REPORT)
+
+## 当前版本 1.5.4：验证范围（2026-10-10）
+
+下方旧报告保留为历史记录，其中 Electron、`tests/e2e/*`、100% 覆盖和缺陷清零等描述不能作为当前原生版本的验收依据。当前实现为 Swift/AppKit + WKWebView，以下结论只覆盖本次实际检查的行为。
+
+| 检查 | 本次结果 | 覆盖与限制 |
+| --- | --- | --- |
+| `npm test` | 12 个文件，97 项通过 | 单元检查；保存竞态使用受控延迟和 mock，不能替代原生生命周期验证 |
+| `npm run test:renderer:bridge` | 100 项通过 | 真实 WKWebView + 生产文件读写桥，隔离样本；检查替换、高亮、Unicode 偏移、撤销、dirty、过期匹配和实际磁盘内容。设置、草稿、保存确认使用测试替身 |
+| Web 与原生构建 | TypeScript/Vite、arm64 Swift 编译及签名校验通过 | Vite 大包警告仍存在；编译和签名不证明功能完整 |
+| 实际 AppKit 交互 | 隔离应用中目视检查正文／源码及深色高亮；全部替换后经真实保存确认框保存 | 28 处替换，磁盘字节与预先计算的结果一致。截图在测试对话中查看，未作为仓库文件保存 |
+
+保存样本由 1520 字节变为 1772 字节；原 SHA-256 为 `6998356dc29547adb9ad30996df87697f0a15cafb106f7a331c8abe1b0af2946`，实际新 SHA-256 与预期均为 `0f881c5689ee5e5476f17faa68b2b708060af9ed40fd54b954b156a8c2e48aef`。
+
+相关检查见 `tests/unit/search.test.ts`、`tests/unit/multi_tab_saving.test.ts`、`tests/unit/editor.test.ts` 及 `tests/native/TestRendererSuite.swift`。旧版 WebKit 的高亮降级路径通过隐藏 CSS Highlight API 模拟；中文组合输入通过合成事件验证，尚未实际手工验收中文输入法。此次未重新执行全套原生 PDF、Finder/Dock 或多窗口生命周期检查；原生标题栏实际拖动仍未确认。本次不是全项目缺陷清零验收，先前审计发现的部分安全、草稿及监听生命周期问题仍待处理。
+
+---
+
+## 历史报告（以下内容不代表 1.5.4 当前覆盖）
 
 ## 一、验收执行环境与版本概况
 - **测试时间**：2026-09-28

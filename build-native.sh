@@ -6,7 +6,7 @@ echo "  墨读 MoRead - Native Swift/WebKit Build"
 echo "=========================================="
 
 APP_NAME="MoRead"
-VERSION="1.5.2"
+VERSION="1.5.4"
 DIST_DIR="$(pwd)/dist"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 CONTENTS="${APP_BUNDLE}/Contents"

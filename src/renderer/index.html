@@ -58,11 +58,19 @@
       <main id="content-container" class="app-content-container">
         <!-- Search Bar Floating -->
         <div id="search-bar" class="search-bar-floating hidden">
+          <div class="search-row">
           <input type="text" id="search-input" class="search-input" placeholder="在文档中搜索..." aria-label="搜索框">
           <span id="search-count" class="search-count">0/0</span>
-          <button id="btn-search-prev" class="btn-icon" title="上一处 (Shift+Enter)">▲</button>
-          <button id="btn-search-next" class="btn-icon" title="下一处 (Enter)">▼</button>
-          <button id="btn-search-close" class="btn-icon" title="关闭 (Esc)">✕</button>
+          <button id="btn-search-prev" class="btn-icon" title="上一处 (Shift+Enter)" aria-label="上一个匹配">▲</button>
+          <button id="btn-search-next" class="btn-icon" title="下一处 (Enter)" aria-label="下一个匹配">▼</button>
+          <button id="btn-search-close" class="btn-icon" title="关闭 (Esc)" aria-label="关闭查找替换">✕</button>
+          </div>
+          <div class="search-row">
+            <input type="text" id="replace-input" class="search-input" placeholder="替换为（留空则删除）" aria-label="替换内容">
+            <button id="btn-search-replace" class="btn-secondary btn-sm">替换</button>
+            <button id="btn-search-replace-all" class="btn-secondary btn-sm">全部替换</button>
+          </div>
+          <div class="search-hint"><span id="search-scope"></span><span id="search-message" role="status" aria-live="polite"></span></div>
         </div>
 
         <!-- Conflict Banner -->
@@ -84,7 +92,8 @@
           <h1 class="welcome-title">墨读 MoRead</h1>
           <p class="welcome-desc">专注纯净阅读与学术排版的 macOS Markdown 查看器。支持 LaTeX 复杂公式、语法高亮与文档大纲。</p>
           <div class="welcome-actions">
-            <button id="btn-welcome-open-file" class="btn-primary">打开 Markdown 文件...</button>
+            <button id="btn-welcome-new-file" class="btn-primary">新建文件</button>
+            <button id="btn-welcome-open-file" class="btn-secondary">打开 Markdown 文件...</button>
             <button id="btn-welcome-open-folder" class="btn-secondary">打开文件夹...</button>
           </div>
           <div id="recent-container" class="recent-list-container">
@@ -131,7 +140,7 @@
       </div>
       <div class="status-right">
         <span id="status-stats">0 字符 · 0 行</span>
-        <span>MoRead v1.5.2</span>
+        <span>MoRead v1.5.4</span>
       </div>
     </footer>
   </div>

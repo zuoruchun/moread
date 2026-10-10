@@ -1,6 +1,6 @@
 {
   "name": "moread",
-  "version": "1.5.2",
+  "version": "1.5.4",
   "description": "墨读 MoRead - 个人自用 macOS Markdown 阅读器 (Swift/AppKit + WKWebView)",
   "author": "Ruchun Zuo",
   "scripts": {

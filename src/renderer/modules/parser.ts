@@ -238,7 +238,10 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
         resolvedSrc = `mored://local?path=${encodeURIComponent(fullPath)}`;
       } else if (/^(https?:)?\/\//i.test(src)) {
         if (!options.allowRemoteImages) {
-          return `<div class="remote-image-blocked" title="远程图片已默认拦截以保护隐私 (可在设置中启用)">[远程图片已拦截: ${escapeHtml(src)}]</div>`;
+          const attributes = before + after;
+          const alt = attributes.match(/\balt=(['"])(.*?)\1/i)?.[2] || '';
+          const title = attributes.match(/\btitle=(['"])(.*?)\1/i)?.[2] || '';
+          return `<div class="remote-image-blocked" data-original-src="${escapeHtml(src)}" data-original-alt="${escapeHtml(md.utils.unescapeAll(alt))}" data-original-title="${escapeHtml(md.utils.unescapeAll(title))}" contenteditable="false" title="远程图片已默认拦截以保护隐私 (可在设置中启用)">[远程图片已拦截: ${escapeHtml(src)}]</div>`;
         }
       }
       return `<img ${before}src=${quote}${resolvedSrc}${quote}${after} data-original-src="${escapeHtml(src)}" loading="lazy" class="mored-image">`;

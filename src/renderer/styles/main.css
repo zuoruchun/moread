@@ -326,6 +326,8 @@ html, body {
   background-color: var(--bg-primary);
 }
 
+.app-content-container.search-open { padding-top: var(--search-bar-space, 112px); }
+
 .markdown-scroll-wrapper {
   flex: 1;
   overflow-y: auto;
@@ -347,6 +349,7 @@ html, body {
 
 /* Source View */
 .source-view-container {
+  position: relative;
   flex: 1;
   padding: 24px;
   background-color: var(--code-bg);
@@ -354,6 +357,8 @@ html, body {
 }
 
 .source-textarea {
+  position: relative;
+  z-index: 1;
   width: 100%;
   height: 100%;
   font-family: var(--font-mono);
@@ -371,9 +376,10 @@ html, body {
 .search-bar-floating {
   position: absolute;
   top: 12px;
-  right: 24px;
+  right: 12px;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 6px;
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
@@ -382,9 +388,30 @@ html, body {
   padding: 6px 10px;
   z-index: 50;
   transition: opacity 0.15s ease, transform 0.15s ease;
+  max-width: calc(100% - 24px);
+  box-sizing: border-box;
 }
 
+.search-row { display: flex; align-items: center; gap: 6px; }
+.search-row .search-input { flex: 1; min-width: 50px; width: 150px; }
+.search-row .btn-icon { flex-shrink: 0; padding: 4px 6px; }
+.search-row .btn-sm { flex-shrink: 0; padding: 4px 8px; }
+.search-hint { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--text-muted); font-size: 10px; }
+#search-message { color: var(--text-primary); }
+.search-source-overlay { position: absolute; z-index: 0; pointer-events: none; overflow: hidden; color: var(--text-primary); }
+.search-source-text { box-sizing: border-box; overflow-wrap: break-word; }
+.source-textarea.search-highlighted { color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--text-primary); }
+.search-source-text mark { color: #242424; padding: 0; }
+.search-source-text mark.current { color: #171717; }
+.search-render-overlay { position: absolute; inset: 0; z-index: 3; pointer-events: none; overflow: hidden; }
+.search-render-overlay span { position: absolute; background: rgba(255, 211, 72, 0.4); }
+.search-render-overlay span.current { background: rgba(255, 142, 30, 0.5); outline: 2px solid var(--accent-color); }
+
+::highlight(moread-search) { background-color: #ffe282; color: #242424; }
+::highlight(moread-search-current) { background-color: #ff9b38; color: #171717; text-decoration: underline; }
+
 .search-bar-floating.hidden {
+  visibility: hidden;
   opacity: 0;
   pointer-events: none;
   transform: translateY(-8px);
@@ -413,13 +440,13 @@ html, body {
 }
 
 .mored-search-match {
-  background-color: var(--search-match-bg);
+  background-color: #ffe282;
   color: inherit;
   border-radius: 2px;
 }
 
 .mored-search-match.current {
-  background-color: var(--search-match-current);
+  background-color: #ff9b38;
   outline: 2px solid var(--accent-color);
 }
 
@@ -456,6 +483,8 @@ html, body {
 
 .welcome-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 12px;
   margin-bottom: 32px;
 }
@@ -823,6 +852,8 @@ body.exporting-pdf #app-status-bar,
 body.exporting-pdf .app-status-bar,
 body.exporting-pdf #search-bar,
 body.exporting-pdf .search-bar-floating,
+body.exporting-pdf .search-render-overlay,
+body.exporting-pdf .search-source-overlay,
 body.exporting-pdf #error-banner,
 body.exporting-pdf .error-banner,
 body.exporting-pdf #conflict-banner,
@@ -913,6 +944,8 @@ body.exporting-pdf .markdown-body h3 {
   .app-status-bar,
   #search-bar,
   .search-bar-floating,
+  .search-render-overlay,
+  .search-source-overlay,
   #error-banner,
   .error-banner,
   #conflict-banner,

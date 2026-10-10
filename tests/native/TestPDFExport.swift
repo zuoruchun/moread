@@ -193,7 +193,7 @@ final class PDFExportTests: NSObject, NSApplicationDelegate, WKScriptMessageHand
             assert(a.markdownBodyEl.textContent.includes('UNSAVEDRENDEREDMARK'), 'Rendered edits lost switching tabs');
             assert(a.markdownBodyEl.querySelector('.code-editor').value.includes('TABCODEMARK'), 'Code edits lost switching tabs');
             assert(a.markdownBodyEl.querySelector('input.code-lang').value === 'javascript', 'Code language lost switching tabs');
-            assert(a.markdownBodyEl.querySelector('.math-block-wrapper').getAttribute('data-raw-formula') === 'x^3', 'Formula lost switching tabs');
+            assert(a.markdownBodyEl.querySelector('.math-block-wrapper').getAttribute('data-raw-formula') === 'x^3', 'Formula lost switching tabs: ' + JSON.stringify({formula:a.markdownBodyEl.querySelector('.math-block-wrapper').getAttribute('data-raw-formula'),raw:a.activeTab.rawContent.slice(0,600)}));
             assert(a.activeTab.isEdited && a.activeTab.savedContent === savedBefore, 'Switch incorrectly marked edits saved');
             a.switchTab(shortID);
             assert(a.activeTab.savedContent === shortSaved && !a.activeTab.isEdited, 'Edits contaminated other tab');
@@ -213,7 +213,7 @@ final class PDFExportTests: NSObject, NSApplicationDelegate, WKScriptMessageHand
             a.sourceTextareaEl.value = '![missing](absent.png)';
             await exportNow('missing-image');
             window.webkit.messageHandlers.testResult.postMessage({success:true,checks,detail:'Editor state, privacy and actual PDF regression passed'});
-          } catch (error) { window.webkit.messageHandlers.testResult.postMessage({success:false,checks,detail:String(error.stack || error)}); }
+          } catch (error) { window.webkit.messageHandlers.testResult.postMessage({success:false,checks,detail:String(error) + ' | ' + String(error.stack || '')}); }
         })();
         """)
     }

@@ -2,6 +2,7 @@ import { parseMarkdown, extractHeadings } from './modules/parser.ts';
 import { htmlToMarkdown } from './modules/editor.ts';
 import { createPDFSnapshot, type PDFSnapshot } from './modules/pdfExport.ts';
 import { bindCodeBlockEditing, readCodeBlock } from './modules/codeBlocks.ts';
+import { bindMathEditing, setMathEditingEnabled } from './modules/mathEditing.ts';
 import { OutlineController } from './modules/outline.ts';
 import { SearchController } from './modules/search.ts';
 import { FileTreeController } from './modules/fileTree.ts';
@@ -54,6 +55,8 @@ export class MoReadApp {
   private draftTimeout: ReturnType<typeof setTimeout> | null = null;
   private reloadRequests = new WeakMap<DocumentTab, object>();
   private contentRenderGeneration = 0;
+  private editModeRequest: DocumentTab | null = null;
+  private deferredEditorAction: { tab: DocumentTab; action: 'source' | 'edit' } | null = null;
 
   // Controllers
   public outlineController!: OutlineController;
@@ -255,6 +258,13 @@ export class MoReadApp {
       btnSearchNext,
       btnSearchClose
     );
+    this.searchController.configure({
+      source: this.sourceTextareaEl,
+      isSource: () => this.isSourceMode,
+      canReplace: () => !!this.activeTab?.isEditMode,
+      isComposing: () => this.isComposing,
+      hasDocument: () => !!this.activeTab
+    });
 
     this.fileTreeController = new FileTreeController(this.filesContentEl, (filePath) => {
       this.loadFile(filePath);
@@ -306,6 +316,7 @@ export class MoReadApp {
 
   private initEventListeners(): void {
     // Welcome screen actions
+    document.getElementById('btn-welcome-new-file')?.addEventListener('click', () => this.openNewEmptyTab());
     document.getElementById('btn-welcome-open-file')?.addEventListener('click', () => this.triggerOpenFile());
     document.getElementById('btn-welcome-open-folder')?.addEventListener('click', () => this.triggerOpenFolder());
     document.getElementById('btn-clear-recent')?.addEventListener('click', async () => {
@@ -361,6 +372,7 @@ export class MoReadApp {
       const allowRemoteImages = this.selectRemoteImagesEl.value === 'allow';
       this.saveSetting({ allowRemoteImages });
       if (this.activeTab && !this.isSourceMode) {
+        this.activeTab.rawContent = this.getTabContent(this.activeTab);
         this.renderActiveTabContent();
       }
     });
@@ -416,6 +428,14 @@ export class MoReadApp {
     window.addEventListener('compositionend', () => {
       this.isComposing = false;
       this.scheduleAutoSave();
+      const deferred = this.deferredEditorAction;
+      this.deferredEditorAction = null;
+      if (deferred) setTimeout(() => {
+        if (this.activeTab === deferred.tab && !this.isComposing) {
+          if (deferred.action === 'source') this.toggleSourceView();
+          else void this.toggleEditMode();
+        }
+      }, 0);
     });
 
     // Sidebar tabs
@@ -490,6 +510,7 @@ export class MoReadApp {
 
     // WYSIWYG Editing listeners on markdown body
     bindCodeBlockEditing(this.markdownBodyEl);
+    bindMathEditing(this.markdownBodyEl, () => this.isEditMode && !this.isSourceMode);
     this.markdownBodyEl.addEventListener('input', (e) => this.handleEditorInput(e));
     this.markdownBodyEl.addEventListener('click', (e) => this.handleContentClick(e));
 
@@ -567,7 +588,19 @@ export class MoReadApp {
       isEditMode: true
     });
     this.switchTab(tab.id);
+    this.markdownBodyEl.focus();
     return tab;
+  }
+
+  private getTabContent(tab: DocumentTab): string {
+    if (this.activeTab !== tab) return tab.rawContent;
+    if (tab.isSourceMode) return this.sourceTextareaEl?.value ?? tab.rawContent;
+    return tab.isEdited && this.markdownBodyEl ? htmlToMarkdown(this.markdownBodyEl) : tab.rawContent;
+  }
+
+  private updateDocumentEdited(): void {
+    const dirty = this.tabs?.length ? this.tabs.some(tab => tab.isEdited) : this.isEdited;
+    window.electronAPI?.setDocumentEdited(dirty);
   }
 
   public switchTab(tabId: string): void {
@@ -756,7 +789,8 @@ export class MoReadApp {
         // Never let an older render move another tab, or undo a user's new scroll.
         if (this.activeTab === tab && generation === this.contentRenderGeneration &&
             tab.isSourceMode === sourceMode && scrollEl.scrollTop === scrollTop) {
-          this.setScrollRatio(tab.scrollRatio || 0);
+          if (this.searchController?.isOpen) this.searchController.refresh();
+          else this.setScrollRatio(tab.scrollRatio || 0);
         }
       });
     }
@@ -772,7 +806,8 @@ export class MoReadApp {
       }
     }
 
-    window.electronAPI?.setDocumentEdited(tab.isEdited);
+    setMathEditingEnabled(this.markdownBodyEl, tab.isEditMode);
+    this.updateDocumentEdited();
   }
 
   private showWelcomeScreen(): void {
@@ -793,8 +828,9 @@ export class MoReadApp {
     if (this.statusFileSizeEl) this.statusFileSizeEl.textContent = '-';
     if (this.statusStatsEl) this.statusStatsEl.textContent = '0 字符 · 0 行';
     this.outlineController?.update([]);
+    this.searchController?.refresh();
     this.renderTabBar();
-    window.electronAPI?.setDocumentEdited(false);
+    this.updateDocumentEdited();
   }
 
   // --- Read vs Edit Mode ---
@@ -802,6 +838,7 @@ export class MoReadApp {
   public updateUIForMode(): void {
     const tab = this.activeTab;
     if (!tab) return;
+    if (this.markdownBodyEl) setMathEditingEnabled(this.markdownBodyEl, tab.isEditMode);
 
     if (tab.isEditMode) {
       if (typeof document !== 'undefined' && document.body) {
@@ -856,52 +893,69 @@ export class MoReadApp {
         this.markdownScrollWrapperEl.style.display = 'flex';
       }
     }
+    this.searchController?.refresh();
   }
 
   public async toggleEditMode(): Promise<void> {
     const tab = this.activeTab;
     if (!tab) return;
-
-    if (!tab.isEditMode) {
-      tab.isEditMode = true;
-      this.updateUIForMode();
-    } else {
-      // Exiting Edit Mode
-      if (!tab.isEdited) {
-        tab.isEditMode = false;
+    if (this.isComposing) {
+      this.deferredEditorAction = { tab, action: 'edit' };
+      return;
+    }
+    if (this.editModeRequest) return;
+    this.editModeRequest = tab;
+    try {
+      if (!tab.isEditMode) {
+        tab.isEditMode = true;
         this.updateUIForMode();
       } else {
-        // Safe Exit Confirmation: Save / Discard / Cancel
-        const res = await window.electronAPI.confirmSaveDialog(tab.title);
-        if (res.action === 'save') {
-          const success = await this.saveCurrentFile();
-          if (success) {
-            tab.isEditMode = false;
-            this.updateUIForMode();
-          }
-          // If save failed: stay in edit mode!
-        } else if (res.action === 'dont-save') {
-          // Discard changes and revert to savedContent
-          tab.rawContent = tab.savedContent;
-          tab.isEdited = false;
+        // Exiting Edit Mode
+        if (!tab.isEdited) {
           tab.isEditMode = false;
-          this.markAsSaved();
-          this.renderActiveTabContent();
+          this.updateUIForMode();
+        } else {
+          // Safe Exit Confirmation: Save / Discard / Cancel
+          const res = await window.electronAPI.confirmSaveDialog(tab.title);
+          if (!this.tabs.includes(tab)) return;
+          if (res.action === 'save') {
+            const success = await this.saveTab(tab);
+            if (success) {
+              tab.isEditMode = false;
+              if (this.activeTab === tab) this.updateUIForMode();
+            }
+            // If save failed: stay in edit mode!
+          } else if (res.action === 'dont-save') {
+            // Discard changes and revert to savedContent
+            tab.rawContent = tab.savedContent;
+            tab.isEdited = false;
+            tab.isEditMode = false;
+            this.markAsSaved(tab);
+            if (this.activeTab === tab) this.renderActiveTabContent();
+          }
+          // 'cancel': remain in edit mode
         }
-        // 'cancel': remain in edit mode
       }
+    } catch (error) {
+      this.showError(`结束编辑失败，当前修改仍保留：${error instanceof Error ? error.message : '请重试'}`);
+    } finally {
+      this.editModeRequest = null;
     }
   }
 
   public toggleSourceView(): void {
     const tab = this.activeTab;
     if (!tab) return;
+    if (this.isComposing) {
+      this.deferredEditorAction = { tab, action: 'source' };
+      return;
+    }
 
     tab.scrollRatio = this.getScrollRatio();
     tab.isSourceMode = !tab.isSourceMode;
 
     if (tab.isSourceMode) {
-      const markdown = htmlToMarkdown(this.markdownBodyEl);
+      const markdown = tab.isEdited ? htmlToMarkdown(this.markdownBodyEl) : tab.rawContent;
       tab.rawContent = markdown;
       this.sourceTextareaEl.value = markdown;
       this.updateUIForMode();
@@ -923,8 +977,13 @@ export class MoReadApp {
       this.updateStatsFromText(markdown);
     }
 
+    const sourceMode = tab.isSourceMode;
+    this.searchController.refresh();
     requestAnimationFrame(() => {
-      this.setScrollRatio(tab.scrollRatio);
+      if (this.activeTab === tab && tab.isSourceMode === sourceMode) {
+        if (this.searchController.isOpen) this.searchController.refresh();
+        else this.setScrollRatio(tab.scrollRatio);
+      }
     });
   }
 
@@ -1183,7 +1242,7 @@ export class MoReadApp {
 
     if (!tab.filePath) {
       // Untitled document: redirect to Save As
-      return this.handleSaveAs();
+      return this.handleSaveAs(tab);
     }
 
     if (tab.isReadOnly) {
@@ -1198,7 +1257,7 @@ export class MoReadApp {
     }
     if (!tab.isEdited) return true;
 
-    const contentToSave = tab.isSourceMode ? (this.sourceTextareaEl?.value ?? tab.rawContent) : (this.markdownBodyEl ? htmlToMarkdown(this.markdownBodyEl) : tab.rawContent);
+    const contentToSave = this.getTabContent(tab);
     const revision = tab.editRevision;
     const baseline = tab.savedContent;
     const filePath = tab.filePath;
@@ -1235,54 +1294,77 @@ export class MoReadApp {
         return false;
       }
 
-      if (this.currentFilePath !== filePath && tab?.filePath !== filePath) return true;
-      this.lastSavedContent = contentToSave;
+      if (tab && (!this.tabs.includes(tab) || tab.filePath !== filePath)) return true;
+      if (!tab && this.currentFilePath !== filePath) return true;
+      const isActive = !tab || this.activeTab === tab;
       if (tab) {
         tab.savedContent = contentToSave;
         tab.revision = res.stats?.revision;
         tab.externalConflict = false;
+      } else {
+        this.lastSavedContent = contentToSave;
       }
-      this.autoSavePaused = false;
-      if (res.stats && this.statusFileSizeEl) {
+      if (isActive) this.autoSavePaused = false;
+      if (isActive && res.stats && this.statusFileSizeEl) {
         const sizeKb = (res.stats.size / 1024).toFixed(1);
         this.statusFileSizeEl.textContent = `${sizeKb} KB`;
       }
 
-      if (revision === this.editRevision || (tab && revision === tab.editRevision)) {
-        this.currentRawContent = contentToSave;
+      const unchanged = revision === (tab ? tab.editRevision : this.editRevision);
+      if (unchanged) {
         if (tab) tab.rawContent = contentToSave;
-        if (!this.isSourceMode && this.sourceTextareaEl) this.sourceTextareaEl.value = contentToSave;
-        this.markAsSaved();
-        this.updateStatsFromText(contentToSave);
-        this.hideError();
+        else this.currentRawContent = contentToSave;
+        this.markAsSaved(tab);
+        if (isActive) {
+          if (!this.isSourceMode && this.sourceTextareaEl) this.sourceTextareaEl.value = contentToSave;
+          this.updateStatsFromText(contentToSave);
+          this.hideError();
+        }
       } else {
-        this.scheduleAutoSave();
+        if (isActive) this.scheduleAutoSave();
       }
-      await window.electronAPI?.deleteDraft?.(filePath);
-      return revision === this.editRevision || (tab ? revision === tab.editRevision : false);
+      if (unchanged) await window.electronAPI?.deleteDraft?.(filePath);
+      return unchanged;
     } catch (error) {
       this.pauseAutoSave(`保存失败，自动保存已暂停；当前修改仍保留：${error instanceof Error ? error.message : '请重试'}`);
       return false;
     }
   }
 
-  public async handleSaveAs(): Promise<boolean> {
-    const tab = this.activeTab;
+  public async handleSaveAs(targetTab?: DocumentTab): Promise<boolean> {
+    const tab = targetTab ?? this.activeTab;
     if (!tab || !window.electronAPI) return false;
 
-    const content = tab.isSourceMode ? this.sourceTextareaEl.value : htmlToMarkdown(this.markdownBodyEl);
-    const res = await window.electronAPI.saveAsDialog(tab.filePath || undefined, content);
-    if (!res.canceled && res.filePath) {
+    if (this.isComposing) return false;
+    const content = this.getTabContent(tab);
+    const revision = tab.editRevision;
+    const originalPath = tab.filePath;
+    const res = await window.electronAPI.saveAsDialog(tab.filePath || undefined, content, { hasBOM: tab.hasBOM, lineEnding: tab.lineEnding });
+    if (res.success === false) {
+      this.showError(res.error || '另存为失败，当前修改仍保留');
+      return false;
+    }
+    if (!res.canceled && res.filePath && this.tabs.includes(tab) && tab.filePath === originalPath) {
       tab.filePath = res.filePath;
       tab.title = res.filePath.split('/').pop() || '未命名';
       tab.savedContent = content;
-      tab.rawContent = content;
-      tab.isEdited = false;
-      this.markAsSaved();
+      tab.revision = res.stats?.revision;
+      const unchanged = tab.editRevision === revision;
+      if (unchanged) {
+        tab.rawContent = content;
+        this.markAsSaved(tab);
+      }
       this.renderTabBar();
       this.recordRecentFile(res.filePath);
-      await window.electronAPI.deleteDraft(tab.id);
-      return true;
+      if (unchanged) {
+        await window.electronAPI.deleteDraft(tab.id);
+        if (originalPath) await window.electronAPI.deleteDraft(originalPath);
+      }
+      if (this.activeTab === tab) {
+        this.docPathEl.textContent = res.filePath;
+        this.docPathEl.title = res.filePath;
+      }
+      return unchanged;
     }
     return false;
   }
@@ -1291,7 +1373,7 @@ export class MoReadApp {
     const tab = this.activeTab;
     if (!tab || !window.electronAPI) return false;
 
-    const content = tab.isSourceMode ? this.sourceTextareaEl.value : htmlToMarkdown(this.markdownBodyEl);
+    const content = this.getTabContent(tab);
     const res = await window.electronAPI.saveCopyDialog(tab.filePath || undefined, content);
     if (!res.canceled && res.success) {
       this.showError(`已成功存储副本至: ${res.filePath?.split('/').pop()}`);
@@ -1509,14 +1591,17 @@ export class MoReadApp {
     }
   }
 
-  public markAsSaved(): void {
-    this.cancelAutoSave();
-    if (this.activeTab) {
-      this.activeTab.isEdited = false;
+  public markAsSaved(targetTab?: DocumentTab): void {
+    const tab = targetTab ?? this.activeTab;
+    if (tab) {
+      tab.isEdited = false;
     } else {
       this._isEdited = false;
     }
-    window.electronAPI?.setDocumentEdited(false);
+    this.updateDocumentEdited();
+    this.renderTabBar();
+    if (tab && this.activeTab !== tab) return;
+    this.cancelAutoSave();
 
     const fileName = this.activeTab ? this.activeTab.title : (this.currentFilePath ? this.currentFilePath.split('/').pop() || '未命名' : '未命名');
     if (this.docTitleEl) {

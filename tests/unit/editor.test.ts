@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { parseMarkdown } from '../../src/renderer/modules/parser.ts';
 import { createTurndownService, htmlToMarkdown } from '../../src/renderer/modules/editor.ts';
 
 describe('Editor HTML to Markdown Converter', () => {
@@ -22,6 +23,12 @@ describe('Editor HTML to Markdown Converter', () => {
     const md = htmlToMarkdown(html);
     expect(md).toContain('$$\n\\sum_{i=1}^n x_i = 10\n$$');
     expect(md).toContain('$E = mc^2$');
+  });
+
+  it('preserves preview formula markers and empty formula sources', () => {
+    const html = '<p>before <span class="math-inline-wrapper" data-raw-formula="z"><span class="raw-math-marker" style="display:none">z</span><svg><path d="M0 0"/></svg></span> after</p><div class="math-block-wrapper" data-raw-formula=""><svg></svg></div>';
+    expect(htmlToMarkdown(html)).toContain('before $z$ after');
+    expect(htmlToMarkdown(html)).toContain('$$\n\n$$');
   });
 
   it('converts code blocks with language and exact indentation', () => {
@@ -79,6 +86,16 @@ describe('Editor HTML to Markdown Converter', () => {
 </div>`;
     const md = htmlToMarkdown(html);
     expect(md).toContain('```\nplain text code\n```');
+  });
+
+  it('preserves blocked remote images alongside formulas through rendered editing', () => {
+    const initial = '![remote](https://example.invalid/image.png "图像")\n\n$$\nx^3\n$$';
+    const saved = htmlToMarkdown(parseMarkdown(initial, { allowRemoteImages: false }));
+    expect(saved).toContain('![remote](https://example.invalid/image.png "图像")');
+    const rendered = parseMarkdown(saved, { allowRemoteImages: false });
+    expect(rendered.match(/class="math-block-wrapper"/g)).toHaveLength(1);
+    expect(rendered).toContain('data-raw-formula="x^3"');
+    expect(rendered).not.toContain('<img');
   });
 
   it('handles empty input gracefully', () => {

@@ -140,7 +140,10 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
 
     private func handleSaveAsDialog(id: String, payload: [String: Any]) {
         let currentPath = payload["currentPath"] as? String
-        let content = payload["content"] as? String
+        guard let content = payload["content"] as? String else {
+            sendResponse(id: id, result: ["canceled": false, "success": false, "error": "缺少保存内容"])
+            return
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self = self, let window = self.windowController?.window else {
                 self?.sendResponse(id: id, result: ["canceled": true])
@@ -164,16 +167,26 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
 
             panel.beginSheetModal(for: window) { response in
                 if response == .OK, let targetURL = panel.url {
-                    self.authorizeFile(targetURL.path)
-                    if let content = content, let data = content.data(using: .utf8) {
-                        try? data.write(to: targetURL, options: .atomic)
+                    var text = content
+                    if payload["lineEnding"] as? String == "\r\n" {
+                        text = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\n", with: "\r\n")
                     }
-                    self.fileWatcher?.watch(filePath: targetURL.path)
-                    self.windowController?.allowLocalResources(forDocument: targetURL.path)
-                    self.sendResponse(id: id, result: [
-                        "canceled": false,
-                        "filePath": targetURL.path
-                    ])
+                    var data = Data(text.utf8)
+                    if payload["hasBOM"] as? Bool == true { data.insert(contentsOf: [0xEF, 0xBB, 0xBF], at: 0) }
+                    do {
+                        try data.write(to: targetURL, options: .atomic)
+                        self.authorizeFile(targetURL.path)
+                        self.fileWatcher?.watch(filePath: targetURL.path)
+                        self.windowController?.allowLocalResources(forDocument: targetURL.path)
+                        self.sendResponse(id: id, result: [
+                            "canceled": false,
+                            "success": true,
+                            "filePath": targetURL.path,
+                            "stats": ["revision": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()]
+                        ])
+                    } catch {
+                        self.sendResponse(id: id, result: ["canceled": false, "success": false, "error": "写入文件失败: \(error.localizedDescription)"])
+                    }
                 } else {
                     self.sendResponse(id: id, result: ["canceled": true])
                 }

@@ -9,7 +9,13 @@ export function createTurndownService(): TurndownService {
     hr: '---',
     bulletListMarker: '-',
     codeBlockStyle: 'fenced',
-    emDelimiter: '*'
+    emDelimiter: '*',
+    blankReplacement: (_content, node) => {
+      const el = node as HTMLElement;
+      if (el.classList?.contains('math-block-wrapper')) return `\n\n$$\n${(el.getAttribute('data-raw-formula') || '').trim()}\n$$\n\n`;
+      if (el.classList?.contains('math-inline-wrapper') || el.classList?.contains('math-inline-fallback')) return `$${(el.getAttribute('data-raw-formula') || '').trim()}$`;
+      return (node as any).isBlock ? '\n\n' : '';
+    }
   });
 
   turndown.use(gfm);
@@ -79,10 +85,10 @@ export function createTurndownService(): TurndownService {
 
   // 6. Clean image sources (strip mored:// and restore original src)
   turndown.addRule('cleanImages', {
-    filter: 'img',
+    filter: node => node.nodeName === 'IMG' || (node.nodeName === 'DIV' && node.classList.contains('remote-image-blocked')),
     replacement: (_content, node) => {
       const el = node as HTMLElement;
-      const alt = el.getAttribute('alt') || '';
+      const alt = el.getAttribute('data-original-alt') || el.getAttribute('alt') || '';
       let src = el.getAttribute('data-original-src') || el.getAttribute('src') || '';
       if (src.startsWith('mored://')) {
         try {
@@ -101,7 +107,7 @@ export function createTurndownService(): TurndownService {
           src = decodeURIComponent(src.replace(/^mored:\/\/(local(-file)?\/?)?/, '/'));
         }
       }
-      const title = el.getAttribute('title');
+      const title = el.classList.contains('remote-image-blocked') ? el.getAttribute('data-original-title') : el.getAttribute('title');
       return title ? `![${alt}](${src} "${title}")` : `![${alt}](${src})`;
     }
   });

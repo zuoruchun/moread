@@ -6,9 +6,7 @@ import UniformTypeIdentifiers
 private final class DraggableTitlebarView: NSView {
     override var mouseDownCanMoveWindow: Bool { true }
 
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        true
-    }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
         window?.performDrag(with: event)
@@ -18,6 +16,10 @@ private final class DraggableTitlebarView: NSView {
 private final class MarkdownWebView: WKWebView {
     var onMarkdownFilesDropped: (([String]) -> Void)?
     private(set) var lastMouseDownEvent: NSEvent?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
 
     override func mouseDown(with event: NSEvent) {
         lastMouseDownEvent = event
@@ -126,19 +128,21 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
 
     private func setupTitlebarDragRegion() {
         guard let contentView = window?.contentView else { return }
-        let width: CGFloat = 240
-        let height: CGFloat = 52
         let dragRegion = DraggableTitlebarView(frame: .zero)
         dragRegion.translatesAutoresizingMaskIntoConstraints = false
         dragRegion.wantsLayer = true
         dragRegion.layer?.backgroundColor = NSColor.clear.cgColor
         dragRegion.setAccessibilityElement(false)
         contentView.addSubview(dragRegion, positioned: .above, relativeTo: webView)
+        // Reserve 200 points at either edge for native controls and web toolbar buttons.
+        let preferredWidth = dragRegion.widthAnchor.constraint(equalToConstant: 240)
+        preferredWidth.priority = .defaultHigh
         NSLayoutConstraint.activate([
             dragRegion.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             dragRegion.topAnchor.constraint(equalTo: contentView.topAnchor),
-            dragRegion.widthAnchor.constraint(equalToConstant: width),
-            dragRegion.heightAnchor.constraint(equalToConstant: height)
+            dragRegion.widthAnchor.constraint(lessThanOrEqualTo: contentView.widthAnchor, constant: -400),
+            preferredWidth,
+            dragRegion.heightAnchor.constraint(equalToConstant: 52)
         ])
     }
 
