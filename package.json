@@ -1,9 +1,12 @@
 {
   "name": "moread",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "description": "墨读 MoRead - 个人自用 macOS Markdown 阅读器 (Swift/AppKit + WKWebView)",
   "author": "Ruchun Zuo",
   "scripts": {
+    "test:watcher": "swiftc -parse-as-library -module-cache-path /tmp/moread-watcher-module-cache -target arm64-apple-macos14.0 src-native/FileWatcher.swift tests/native/TestFileWatcher.swift -o /tmp/moread-watcher-tests && /tmp/moread-watcher-tests",
+    "test:security": "swiftc -D MOREAD_BRIDGE_INTEGRATION -parse-as-library -module-cache-path /tmp/moread-native-security-module-cache -target arm64-apple-macos14.0 -framework Cocoa -framework WebKit -framework UniformTypeIdentifiers src-native/SettingsManager.swift src-native/FileWatcher.swift src-native/LocalFileSchemeHandler.swift src-native/NativeBridge.swift tests/native/TestBridgeSecurity.swift -o /tmp/moread-bridge-security-tests && /tmp/moread-bridge-security-tests",
+    "test:window": "npm run build:web && python3 tests/native/run-window-close.py",
     "test:lifecycle": "swiftc -parse-as-library -module-cache-path /tmp/moread-lifecycle-module-cache -target arm64-apple-macos14.0 -framework Cocoa src-native/AppDelegate.swift tests/native/TestAppLifecycle.swift -o /tmp/moread-lifecycle-tests && /tmp/moread-lifecycle-tests",
     "test:scroll": "npm run build:web && swiftc -parse-as-library -module-cache-path /tmp/moread-scroll-module-cache -target arm64-apple-macos14.0 -framework Cocoa -framework WebKit src-native/FileWatcher.swift tests/native/TestScrollReload.swift -o /tmp/moread-scroll-tests && /tmp/moread-scroll-tests \"$PWD/dist-renderer\"",
     "test:pdf": "npm run build:web && swiftc -parse-as-library -module-cache-path /tmp/moread-pdf-module-cache -target arm64-apple-macos14.0 -framework Cocoa -framework WebKit -framework PDFKit -framework UniformTypeIdentifiers src-native/PDFExporter.swift src-native/LocalFileSchemeHandler.swift tests/native/TestPDFExport.swift -o /tmp/moread-pdf-tests && /tmp/moread-pdf-tests \"$PWD/dist-renderer\" \"$PWD/_codex_sessions/MoReadBugs/tmp/pdfs/regression\"",

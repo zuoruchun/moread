@@ -11,6 +11,20 @@ public final class MainWindowController {
     public let nativeBridge = RecordingBridge()
     public var opened: [String] = []
     public var presentations = 0
+    public var closeAllowed = true
+    public var closeApprovalValid = true
+    public var approvalRequests = 0
+    public var canceledApprovals = 0
+    public func cancelCloseApproval() { canceledApprovals += 1 }
+    public var onApproval: (() -> Void)?
+    public func requestCloseApproval(completion: @escaping (Bool) -> Void) {
+        approvalRequests += 1
+        onApproval?()
+        completion(closeAllowed)
+    }
+    public func validateCloseApproval(completion: @escaping (Bool) -> Void) {
+        completion(closeApprovalValid)
+    }
     public init(initialFolderPath: String? = nil) { currentFolderPath = initialFolderPath }
     public func presentWindow() { presentations += 1 }
     public func openFiles(_ paths: [String]) { opened += paths }
@@ -82,6 +96,33 @@ struct AppLifecycleTests {
         _ = earlyDock.application(app, openFile: first)
         launch(earlyDock)
         check(earlyDock.windowControllers.count == 1 && earlyDock.windowControllers[0].opened == [first], "Reopen before startup does not create duplicate startup windows")
+
+        let quitting = AppDelegate()
+        let firstWindow = MainWindowController(), secondWindow = MainWindowController()
+        quitting.windowControllers = [firstWindow, secondWindow]
+        var approved: Bool?
+        quitting.requestTerminationApproval { approved = $0 }
+        check(approved == true && firstWindow.approvalRequests == 1 && secondWindow.approvalRequests == 1, "Quit checks every window before approval")
+        check(quitting.windowControllers.count == 2, "Approval leaves all windows open until the application exits")
+        firstWindow.closeAllowed = false
+        let priorSecondRequests = secondWindow.approvalRequests
+        quitting.requestTerminationApproval { approved = $0 }
+        check(approved == false && secondWindow.approvalRequests == priorSecondRequests, "Cancel or failed save aborts quit without processing another window")
+        check(firstWindow.canceledApprovals == 1 && secondWindow.canceledApprovals == 1, "Canceled quit resumes editing in every window")
+        firstWindow.closeAllowed = true
+        secondWindow.onApproval = { firstWindow.closeApprovalValid = false }
+        quitting.requestTerminationApproval { approved = $0 }
+        check(approved == false, "Editing an earlier window during a later confirmation aborts quit")
+        firstWindow.closeApprovalValid = true
+        secondWindow.onApproval = { quitting.windowControllers.append(MainWindowController()) }
+        quitting.requestTerminationApproval { approved = $0 }
+        check(approved == false, "Opening a new window while confirming aborts quit")
+        secondWindow.onApproval = { quitting.removeWindowController(firstWindow) }
+        quitting.windowControllers = [firstWindow, secondWindow]
+        quitting.requestTerminationApproval { approved = $0 }
+        check(approved == false, "Changing the window set while confirming invalidates quit approval")
+        let empty = AppDelegate()
+        check(empty.applicationShouldTerminate(app) == .terminateNow, "Zero-window application exits immediately")
         print("PASS: \(checks) production AppDelegate lifecycle checks")
     }
 }

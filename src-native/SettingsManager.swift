@@ -65,6 +65,33 @@ public final class SettingsManager: @unchecked Sendable {
         }
     }
 
+    // Kept outside renderer-writable settings; only native file selections add grants.
+    public func trustedDirectories() -> Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        return trustedDirectoriesInternal()
+    }
+
+    public func trustDirectory(_ directory: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        var directories = trustedDirectoriesInternal()
+        directories.insert(directory)
+        if let data = try? JSONSerialization.data(withJSONObject: Array(directories).sorted()) {
+            try? data.write(to: authorizationURL, options: .atomic)
+        }
+    }
+
+    private var authorizationURL: URL {
+        configURL.deletingLastPathComponent().appendingPathComponent("trusted-directories.json")
+    }
+
+    private func trustedDirectoriesInternal() -> Set<String> {
+        guard let data = try? Data(contentsOf: authorizationURL),
+              let directories = try? JSONSerialization.jsonObject(with: data) as? [String] else { return [] }
+        return Set(directories)
+    }
+
     private func getSettingsInternal() -> [String: Any] {
         let defaults = defaultSettings()
 

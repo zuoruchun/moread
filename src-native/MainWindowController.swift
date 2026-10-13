@@ -60,6 +60,7 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
     private var isWebContentLoaded = false
     private var isRendererReady = false
     private var pendingOpenFilePaths: [String] = []
+    private var closeRequestPending = false
     public private(set) var currentFolderPath: String?
 
     public init(initialFolderPath: String? = nil) {
@@ -81,7 +82,7 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
         restoreWindowFrame()
 
         if let initialFolderPath = initialFolderPath {
-            nativeBridge.authorizeDirectory(initialFolderPath)
+            nativeBridge.authorizeDirectory(initialFolderPath, persist: true)
         }
 
         setupWebView()
@@ -183,7 +184,7 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
         guard !filePaths.isEmpty else { return }
         presentWindow()
         for filePath in filePaths {
-            nativeBridge.authorizeFile(filePath)
+            nativeBridge.authorizeFile(filePath, persist: true)
             localFileSchemeHandler.allowDocument(at: filePath)
             window?.title = URL(fileURLWithPath: filePath).lastPathComponent
             if isWebContentLoaded && isRendererReady {
@@ -238,7 +239,7 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
             panel.beginSheetModal(for: window) { [weak self] response in
                 if response == .OK, let url = panel.url {
                     self?.currentFolderPath = url.path
-                    self?.nativeBridge.authorizeDirectory(url.path)
+                    self?.nativeBridge.authorizeDirectory(url.path, persist: true)
                     self?.nativeBridge.notifyOpenFolder(url.path)
                 }
             }
@@ -332,13 +333,48 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
         window?.close()
     }
 
+    public func requestCloseApproval(completion: @escaping (Bool) -> Void) {
+        guard isRendererReady else {
+            completion(window?.isDocumentEdited != true)
+            return
+        }
+        webView.callAsyncJavaScript(
+            "return await window.moreadApp.prepareToClose();",
+            arguments: [:], in: nil, in: .page
+        ) { result in
+            switch result {
+            case .success(let value): completion(value as? Bool == true)
+            case .failure: completion(false)
+            }
+        }
+    }
+
+    public func validateCloseApproval(completion: @escaping (Bool) -> Void) {
+        guard isRendererReady else {
+            completion(window?.isDocumentEdited != true)
+            return
+        }
+        webView.evaluateJavaScript("window.moreadApp.isPreparedToClose()") { value, error in
+            completion(error == nil && value as? Bool == true)
+        }
+    }
+
+    public func cancelCloseApproval() {
+        guard isRendererReady else { return }
+        webView.evaluateJavaScript("window.moreadApp.cancelClosePreparation()", completionHandler: nil)
+    }
+
     // MARK: - NSWindowDelegate
     public func windowShouldClose(_ sender: NSWindow) -> Bool {
-        if sender.isDocumentEdited {
-            nativeBridge.notifyMenuAction("request-close")
-            return false
+        guard isRendererReady || sender.isDocumentEdited else { return true }
+        guard !closeRequestPending else { return false }
+        closeRequestPending = true
+        requestCloseApproval { [weak self] allowed in
+            guard let self else { return }
+            self.closeRequestPending = false
+            if allowed { self.forceCloseWindow() }
         }
-        return true
+        return false
     }
 
     // MARK: - WKNavigationDelegate
@@ -368,6 +404,8 @@ public final class MainWindowController: NSWindowController, WKNavigationDelegat
 
     public func windowWillClose(_ notification: Notification) {
         saveWindowFrame()
+        nativeBridge.stopWatchingFiles()
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "nativeAPI")
         if let appDelegate = NSApp.delegate as? AppDelegate {
             appDelegate.removeWindowController(self)
         }

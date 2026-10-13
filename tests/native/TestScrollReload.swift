@@ -25,8 +25,10 @@ final class ScrollReloadTests: NSObject, NSApplicationDelegate, WKScriptMessageH
         window = NSWindow(contentRect: webView.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = webView
         window.title = "MoRead isolated scroll regression"
-        window.orderFront(nil)
-        let renderer = URL(fileURLWithPath: CommandLine.arguments[1])
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        let renderer = CommandLine.arguments.count > 1 ? URL(fileURLWithPath: CommandLine.arguments[1]) : Bundle.main.resourceURL!.appendingPathComponent("web")
         webView.loadFileURL(renderer.appendingPathComponent("index.html"), allowingReadAccessTo: renderer)
         watcher = FileWatcher { [weak self] _ in
             DispatchQueue.main.async {
@@ -44,6 +46,9 @@ final class ScrollReloadTests: NSObject, NSApplicationDelegate, WKScriptMessageH
 
     func finish(_ success: Bool, _ detail: String) {
         print(detail)
+        if CommandLine.arguments.count == 1 {
+            try? detail.write(to: Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("scroll-result.log"), atomically: true, encoding: .utf8)
+        }
         watcher?.stop()
         try? FileManager.default.removeItem(at: root)
         exit(success ? 0 : 1)
@@ -74,6 +79,7 @@ final class ScrollReloadTests: NSObject, NSApplicationDelegate, WKScriptMessageH
     func runTests() {
         webView.evaluateJavaScript("""
         (async () => {
+          while (document.visibilityState !== 'visible') await new Promise(resolve => setTimeout(resolve, 50));
           const a = window.moreadApp, path = \(json([fileURL.path]))[0];
           let checks = 0;
           const check = (ok, message) => { if (!ok) throw new Error(message); checks++; };
@@ -117,7 +123,7 @@ final class ScrollReloadTests: NSObject, NSApplicationDelegate, WKScriptMessageH
           a.toggleSourceView(); await wait();
           const other = a.createTab({title:'Other',rawContent:original,savedContent:original,scrollRatio:0.3});
           a.renderActiveTabContent(); a.switchTab(other.id); await wait();
-          check(near(0.3),'Old render callback moved another tab');
+          check(near(0.3),'Old render callback moved another tab: '+JSON.stringify({ratio:a.getScrollRatio(),visibility:document.visibilityState}));
           move(0.4); a.renderActiveTabContent(); move(0.65); await wait();
           check(near(0.65),'Render callback undid new user scrolling');
           other.filePath = path + '.other.md';
@@ -142,7 +148,7 @@ final class ScrollReloadTests: NSObject, NSApplicationDelegate, WKScriptMessageH
 struct ScrollReloadMain {
     @MainActor static func main() {
         let app = NSApplication.shared, delegate = ScrollReloadTests()
-        app.setActivationPolicy(.accessory)
+        app.setActivationPolicy(.regular)
         app.delegate = delegate
         app.run()
         withExtendedLifetime(delegate) {}

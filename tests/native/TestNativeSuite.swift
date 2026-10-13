@@ -175,6 +175,59 @@ struct TestRunner {
             assertTrue(!LocalFileAccessPolicy.isPath(traversalTarget, inside: allowedRoot), "Local image directory traversal is rejected")
         }
 
+        do {
+            let fixture = FileManager.default.temporaryDirectory.appendingPathComponent("moread_policy_\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: fixture) }
+            let allowed = fixture.appendingPathComponent("allowed")
+            let outside = fixture.appendingPathComponent("outside")
+            try FileManager.default.createDirectory(at: allowed, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+            let roots: Set<String> = [LocalFileAccessPolicy.canonicalPath(allowed.path)]
+            let inside = allowed.appendingPathComponent("inside.md")
+            let secret = outside.appendingPathComponent("secret.md")
+            try Data("inside".utf8).write(to: inside)
+            try Data("outside".utf8).write(to: secret)
+            let escape = allowed.appendingPathComponent("escape.md")
+            try FileManager.default.createSymbolicLink(at: escape, withDestinationURL: secret)
+            assertTrue(!LocalFileAccessPolicy.isPath(escape.path, inside: roots.first!), "File symlink cannot escape an authorized root")
+            assertTrue((try? LocalFileAccessPolicy.readFile(at: escape.path, allowedDirectories: roots, maximumSize: 100)) == nil, "Descriptor reader rejects an external file symlink")
+            let linkedDirectory = allowed.appendingPathComponent("external")
+            try FileManager.default.createSymbolicLink(at: linkedDirectory, withDestinationURL: outside)
+            assertTrue((try? LocalFileAccessPolicy.readFile(at: linkedDirectory.appendingPathComponent("secret.md").path, allowedDirectories: roots, maximumSize: 100)) == nil, "Descriptor reader rejects an external directory symlink")
+            let chain = allowed.appendingPathComponent("chain.md")
+            try FileManager.default.createSymbolicLink(at: chain, withDestinationURL: escape)
+            assertTrue((try? LocalFileAccessPolicy.readFile(at: chain.path, allowedDirectories: roots, maximumSize: 100)) == nil, "Descriptor reader rejects a chained escape symlink")
+            let internalLink = allowed.appendingPathComponent("internal.md")
+            try FileManager.default.createSymbolicLink(at: internalLink, withDestinationURL: inside)
+            assertEqual(try LocalFileAccessPolicy.readFile(at: internalLink.path, allowedDirectories: roots, maximumSize: 100), Data("inside".utf8), "An internal symlink remains readable")
+            assertTrue((try? LocalFileAccessPolicy.readFile(at: inside.path, allowedDirectories: roots, maximumSize: 3)) == nil, "Descriptor reader enforces actual file-size limit")
+            assertTrue((try? LocalFileAccessPolicy.readFile(at: allowed.path, allowedDirectories: roots, maximumSize: 100)) == nil, "Descriptor reader rejects directories")
+            let fifo = allowed.appendingPathComponent("pipe.md")
+            assertEqual(mkfifo(fifo.path, 0o600), 0, "FIFO fixture created")
+            let started = Date()
+            assertTrue((try? LocalFileAccessPolicy.readFile(at: fifo.path, allowedDirectories: roots, maximumSize: 100)) == nil && Date().timeIntervalSince(started) < 1, "FIFO read rejects promptly without blocking")
+            do {
+                try LocalFileAccessPolicy.writeFile(Data("bad".utf8), at: escape.path, allowedDirectories: roots)
+                assertTrue(false, "External symlink write must be rejected")
+            } catch { assertTrue(true, "External symlink write is rejected") }
+            assertEqual(try Data(contentsOf: secret), Data("outside".utf8), "Rejected symlink write preserves external bytes")
+            let revision = computeSHA256(url: inside)!
+            try LocalFileAccessPolicy.writeFile(Data("updated".utf8), at: internalLink.path, allowedDirectories: roots, expectedRevision: revision)
+            assertEqual(try Data(contentsOf: inside), Data("updated".utf8), "Atomic write through an internal symlink updates its actual target")
+            assertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: internalLink.path), inside.path, "Atomic save preserves the document symlink")
+            do {
+                try LocalFileAccessPolicy.writeFile(Data("stale".utf8), at: inside.path, allowedDirectories: roots, expectedRevision: revision)
+                assertTrue(false, "Stale revision write must be rejected")
+            } catch { assertTrue(true, "Stale revision write is rejected") }
+            assertEqual(try Data(contentsOf: inside), Data("updated".utf8), "Stale revision does not overwrite current bytes")
+            let moved = fixture.appendingPathComponent("moved")
+            try FileManager.default.moveItem(at: allowed, to: moved)
+            try FileManager.default.createSymbolicLink(at: allowed, withDestinationURL: outside)
+            assertTrue((try? LocalFileAccessPolicy.readFile(at: allowed.appendingPathComponent("secret.md").path, allowedDirectories: roots, maximumSize: 100)) == nil, "Replacing a granted directory with a symlink does not expand access")
+        } catch {
+            assertTrue(false, "Native access policy regression failed: \(error)")
+        }
+
         // ----------------------------------------------------
         // Test 8: Folder Tree Scanning
         // ----------------------------------------------------
@@ -222,6 +275,13 @@ struct TestRunner {
             assertEqual(updated["theme"] as? String, "dark", "Theme updated to dark and persisted")
             assertEqual(updated["fontSize"] as? Int, 18, "FontSize updated to 18 and persisted")
 
+            settingsManager.saveSettings(["recentFiles": ["/unapproved/private.md"], "trustedDirectories": ["/unapproved"]])
+            assertTrue(settingsManager.trustedDirectories().isEmpty, "Renderer settings and recent paths cannot create native grants")
+            settingsManager.trustDirectory("/native-selected")
+            let reopened = SettingsManager(configURL: settingsURL)
+            assertEqual(reopened.trustedDirectories(), ["/native-selected"], "Native grants persist independently of renderer settings")
+            reopened.saveSettings(["trustedDirectories": ["/another-unapproved"]])
+            assertEqual(reopened.trustedDirectories(), ["/native-selected"], "Renderer settings cannot overwrite existing native grants")
             try? FileManager.default.removeItem(at: settingsURL.deletingLastPathComponent())
         }
 

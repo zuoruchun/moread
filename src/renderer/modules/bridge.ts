@@ -1,3 +1,14 @@
+export interface RecoveryDraft {
+  id: string;
+  filePath?: string;
+  content: string;
+  timestamp: number;
+  savedContent?: string;
+  revision?: string;
+  hasBOM?: boolean;
+  lineEnding?: '\n' | '\r\n';
+}
+
 export interface BridgeAPI {
   rendererReady: () => Promise<void>;
   beginWindowDrag: () => Promise<void>;
@@ -7,12 +18,13 @@ export interface BridgeAPI {
   saveAsDialog: (currentPath?: string, content?: string, options?: { hasBOM?: boolean; lineEnding?: string }) => Promise<{ canceled: boolean; filePath?: string; success?: boolean; error?: string; stats?: { revision?: string } }>;
   saveCopyDialog: (currentPath?: string, content?: string) => Promise<{ canceled: boolean; filePath?: string; success?: boolean; error?: string }>;
   exportPDF: () => Promise<{ success: boolean; error?: string }>;
-  saveDraft: (draft: { id: string; filePath?: string; content: string; timestamp: number }) => Promise<{ success: boolean }>;
-  getAllDrafts: () => Promise<{ drafts: Array<{ id: string; filePath?: string; content: string; timestamp: number }> }>;
+  saveDraft: (draft: RecoveryDraft) => Promise<{ success: boolean }>;
+  getAllDrafts: () => Promise<{ drafts: RecoveryDraft[] }>;
   deleteDraft: (id: string) => Promise<{ success: boolean }>;
   clearDrafts: () => Promise<{ success: boolean }>;
   checkConflict: (filePath: string, baselineRevision: string) => Promise<{ conflict: boolean; currentRevision?: string; reason?: string }>;
   readFile: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string; stats?: { size: number; mtime: number; revision?: string; hasBOM?: boolean; lineEnding?: '\n' | '\r\n'; isReadOnly?: boolean } }>;
+  unwatchFile?: (filePath: string) => Promise<{ success: boolean }>;
   writeFile: (filePath: string, content: string, expectedRevision?: string, options?: { hasBOM?: boolean; lineEnding?: string }) => Promise<{ success: boolean; error?: string; stats?: { size: number; mtime: number; revision?: string } }>;
   setDocumentEdited: (isEdited: boolean) => Promise<{ success: boolean }>;
   confirmSaveDialog: (fileName: string) => Promise<{ action: 'save' | 'dont-save' | 'cancel' }>;
@@ -146,6 +158,7 @@ export function initNativeBridge(): BridgeAPI {
       clearDrafts: () => callNative('drafts:clear-all'),
       checkConflict: (filePath, baselineRevision) => callNative('fs:check-conflict', { filePath, baselineRevision }),
       readFile: (filePath: string) => callNative('fs:read-file', { filePath }),
+      unwatchFile: (filePath: string) => callNative('fs:unwatch-file', { filePath }),
       writeFile: (filePath: string, content: string, expectedRevision?: string, options?: { hasBOM?: boolean; lineEnding?: string }) => callNative('fs:write-file', { filePath, content, expectedRevision, ...options }),
       setDocumentEdited: (isEdited: boolean) => callNative('window:set-edited', { isEdited }),
       confirmSaveDialog: (fileName: string) => callNative('dialog:confirm-save', { fileName }, 0),

@@ -10,6 +10,49 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     private var pendingOpenFilePaths: [String] = []
     private var hasFinishedLaunching = false
+    private var terminationPending = false
+
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !windowControllers.isEmpty else { return .terminateNow }
+        guard !terminationPending else { return .terminateLater }
+        terminationPending = true
+        requestTerminationApproval { allowed in
+            // AppKit waits for terminateLater in a modal run loop. A main-queue
+            // dispatch can stall there, so deliver even a synchronous result via that loop.
+            RunLoop.main.perform(inModes: [.default, .modalPanel]) {
+                self.terminationPending = false
+                sender.reply(toApplicationShouldTerminate: allowed)
+            }
+        }
+        return .terminateLater
+    }
+
+    public func requestTerminationApproval(completion: @escaping (Bool) -> Void) {
+        let controllers = windowControllers
+        func finish(_ allowed: Bool) {
+            if !allowed { controllers.forEach { $0.cancelCloseApproval() } }
+            completion(allowed)
+        }
+        func unchangedWindows() -> Bool {
+            controllers.count == self.windowControllers.count &&
+                zip(controllers, self.windowControllers).allSatisfy { $0 === $1 }
+        }
+        func validate(_ index: Int) {
+            guard unchangedWindows() else { finish(false); return }
+            guard index < controllers.count else { finish(true); return }
+            controllers[index].validateCloseApproval { valid in
+                if valid { validate(index + 1) } else { finish(false) }
+            }
+        }
+        func prepare(_ index: Int) {
+            guard unchangedWindows() else { finish(false); return }
+            guard index < controllers.count else { validate(0); return }
+            controllers[index].requestCloseApproval { allowed in
+                if allowed { prepare(index + 1) } else { finish(false) }
+            }
+        }
+        prepare(0)
+    }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         setupMainMenu()

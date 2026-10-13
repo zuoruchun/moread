@@ -2,7 +2,7 @@
 
 macOS Markdown 查看器，支持少量编辑、数学公式、代码高亮、大纲、文件列表和多标签页。
 
-当前版本：**1.5.4**。欢迎页可新建文件，编辑模式可点击公式修改 LaTeX；查找支持单项／全部替换，正文和源码中的匹配都有可见高亮。[版本说明](https://github.com/zuoruchun/moread/releases/tag/v1.5.4)
+当前源码版本：**1.5.5**。[已发布版本与说明](https://github.com/zuoruchun/moread/releases)
 
 ## 安装
 

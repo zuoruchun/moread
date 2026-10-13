@@ -26,6 +26,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
     var phase = 0
     var timer: Timer?
     var passedChecks = 0
+    var lastCheck = "renderer startup"
 #if MOREAD_BRIDGE_INTEGRATION
     let productionBridge = NativeBridge()
     let productionHost = MainWindowController()
@@ -80,20 +81,27 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
         window = NSWindow(contentRect: webView.frame, styleMask: [.titled, .resizable], backing: .buffered, defer: false)
         window.contentView = webView
         window.title = "MoRead Renderer Regression"
+        window.center()
         window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
 #if MOREAD_BRIDGE_INTEGRATION
         productionHost.webView = webView
         productionHost.window = window
         productionBridge.windowController = productionHost
         productionBridge.authorizeDirectory(fixtures.path)
 #endif
-        let url = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("index.html")
+        let renderer = CommandLine.arguments.count > 1 ? URL(fileURLWithPath: CommandLine.arguments[1]) : Bundle.main.resourceURL!.appendingPathComponent("web")
+        let url = renderer.appendingPathComponent("index.html")
         webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 45) { [weak self] in
-            if self?.completed == false { self?.finish(false, "Timed out") }
+            if let self, !self.completed {
+                self.webView.evaluateJavaScript("JSON.stringify({visibility:document.visibilityState,frames:window.__frameProbe||0})") { value, _ in
+                    self.finish(false, "Timed out after: \(self.lastCheck); window visible=\(self.window.isVisible), occlusion=\(self.window.occlusionState.rawValue); \(String(describing: value))")
+                }
+            }
         }
     }
 
@@ -104,8 +112,12 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
         }
         guard let body = message.body as? [String: Any], let id = body["id"] as? String, let action = body["action"] as? String else { return }
         let payload = body["payload"] as? [String: Any] ?? [:]
+        if action == "test:checkpoint" {
+            lastCheck = payload["detail"] as? String ?? "unknown check"
+            return
+        }
 #if MOREAD_BRIDGE_INTEGRATION
-        if ["fs:read-file", "fs:read-folder", "fs:write-file"].contains(action) {
+        if ["fs:read-file", "fs:read-folder", "fs:write-file", "fs:unwatch-file"].contains(action) {
             let path = payload["filePath"] as? String ?? payload["folderPath"] as? String ?? ""
             guard URL(fileURLWithPath: path).standardized.path.hasPrefix(fixtures.path) else {
                 finish(false, "Production bridge attempted access outside isolated fixtures"); return
@@ -162,7 +174,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
 
     func poll() {
         guard !completed, phase != 1, phase != 3 else { return }
-        let readiness = phase == 2 ? "Boolean(window.moreadApp && window.moreadApp.currentSettings.theme && !window.__rendererTestInitial)" : "Boolean(window.moreadApp && window.moreadApp.currentSettings.theme)"
+        let readiness = phase == 2 ? "Boolean(window.moreadApp && window.moreadApp.currentSettings.theme && !window.__rendererTestInitial)" : "Boolean(window.moreadApp && window.moreadApp.currentSettings.theme && document.visibilityState === 'visible')"
         webView.evaluateJavaScript(readiness) { [weak self] result, _ in
             guard let self, result as? Bool == true else { return }
             if self.phase == 0 {
@@ -181,6 +193,79 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
         }
     }
 
+    let bugRegressionScript = #"""
+    async (a, api, root, check) => {
+      const originalConfirm = api.confirmSaveDialog;
+      const originalSaveDraft = api.saveDraft, originalGetDrafts = api.getAllDrafts, originalDeleteDraft = api.deleteDraft;
+      const originalEdited = api.setDocumentEdited, originalUnwatch = api.unwatchFile;
+      const drafts = new Map(), unwatched = [];
+      let nativeDirty = false;
+      const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+      api.confirmSaveDialog = async () => ({action:'dont-save'});
+      api.saveDraft = async draft => { drafts.set(draft.id, structuredClone(draft)); return {success:true}; };
+      api.getAllDrafts = async () => ({drafts:[...drafts.values()]});
+      api.deleteDraft = async id => { drafts.delete(id); return {success:true}; };
+      api.setDocumentEdited = async dirty => { nativeDirty = dirty; return originalEdited(dirty); };
+      api.unwatchFile = async path => { unwatched.push(path); return originalUnwatch ? originalUnwatch(path) : {success:true}; };
+      try {
+        a.selectSaveModeEl.value = 'manual'; a.selectSaveModeEl.dispatchEvent(new Event('change'));
+        for (const tab of [...a.tabs]) check(await a.closeTab(tab.id), 'Close preexisting tab without losing test isolation');
+        const original = '# Exact source\n\n[reference][ref]\n\n[ref]: https://example.com\n\n<!-- retain comment -->\n';
+        await api.writeFile(root + '/roundtrip.md', original);
+        a.currentSettings.openMode = 'read';
+        await a.loadFile(root + '/roundtrip.md');
+        a.toggleSourceView();
+        check(a.sourceTextareaEl.value === original && !a.isEdited, 'Read-only source toggle preserves references and comments byte for byte');
+        const paths = ['multi-A.md','multi-B.md','multi-C.md'].map(name => root + '/' + name);
+        for (const path of paths) await api.writeFile(path, '# ' + path + '\n');
+        await Promise.all(paths.map(path => a.loadFile(path)));
+        check(paths.every(path => a.tabs.some(tab => tab.filePath === path)), 'Concurrent open retains all three files');
+
+        const tab = a.tabs.find(tab => tab.filePath === paths[0]);
+        a.switchTab(tab.id);
+        if (!a.isEditMode) await a.toggleEditMode();
+        if (!a.isSourceMode) a.toggleSourceView();
+        a.sourceTextareaEl.value = '# recover this edit\n'; a.markAsEdited();
+        a.switchTab(a.tabs.find(tab => tab.filePath === paths[1]).id);
+        await wait(1750);
+        check([...drafts.values()].some(draft => draft.filePath === paths[0] && draft.content === '# recover this edit\n' && typeof draft.savedContent === 'string'), 'Draft debounce retains inactive document and disk baseline');
+        check(nativeDirty, 'Inactive dirty document keeps native window dirty');
+        api.confirmSaveDialog = async () => ({action:'cancel'});
+        check(!await a.prepareToClose() && a.tabs.includes(tab) && tab.isEdited, 'Quit cancellation retains the dirty document');
+        api.confirmSaveDialog = async () => ({action:'dont-save'});
+        check(await a.prepareToClose() && a.isPreparedToClose(), 'Explicit discard permits close approval');
+        a.switchTab(tab.id); a.sourceTextareaEl.value += 'later edit\n'; a.markAsEdited();
+        check(!a.isPreparedToClose(), 'A later edit invalidates an earlier application quit approval');
+        check(await a.closeTab(tab.id) && unwatched.includes(paths[0]), 'Closing the last tab for a path releases its watcher');
+        check(!nativeDirty, 'Closing the only dirty tab resets native dirty state');
+
+        window.__draftFilenameExecuted = false;
+        const hostileName = 'x<img src=x onerror="window.__draftFilenameExecuted=true">.md';
+        a.renderDraftRecoveryList([{id:'hostile', filePath:hostileName, content:'# harmless', timestamp:Date.now()}]);
+        await wait(150);
+        check(a.draftRecoveryListEl.textContent.includes(hostileName) && !a.draftRecoveryListEl.querySelector('img') && !window.__draftFilenameExecuted, 'Draft filenames display as text without executing HTML');
+
+        a.switchTab(a.tabs.find(tab => tab.filePath === paths[1]).id);
+        if (!a.isEditMode) await a.toggleEditMode();
+        if (a.isSourceMode) a.toggleSourceView();
+        const heading = a.markdownBodyEl.querySelector('h1');
+        heading.textContent = 'unsaved rendered setting edit';
+        heading.dispatchEvent(new InputEvent('input', {bubbles:true,data:'edit'}));
+        a.selectRemoteImagesEl.value = a.selectRemoteImagesEl.value === 'allow' ? 'block' : 'allow';
+        a.selectRemoteImagesEl.dispatchEvent(new Event('change'));
+        check(a.markdownBodyEl.textContent.includes('unsaved rendered setting edit') && a.isEdited, 'Remote image setting preserves current rendered edits');
+        check(await a.saveCurrentFile() && (await api.readFile(paths[1])).content.includes('unsaved rendered setting edit'), 'Preserved rendered edit reaches the correct disk file');
+        for (const remaining of [...a.tabs]) await a.closeTab(remaining.id);
+      } finally {
+        api.confirmSaveDialog = originalConfirm;
+        api.saveDraft = originalSaveDraft; api.getAllDrafts = originalGetDrafts; api.deleteDraft = originalDeleteDraft;
+        api.setDocumentEdited = originalEdited; api.unwatchFile = originalUnwatch;
+        a.currentSettings.openMode = 'edit';
+        a.selectSaveModeEl.value = 'auto'; a.selectSaveModeEl.dispatchEvent(new Event('change'));
+      }
+    }
+    """#
+
     func runInteractions() {
         let fixtureJSON = String(data: try! JSONSerialization.data(withJSONObject: [fixtures.path]), encoding: .utf8)!
         webView.evaluateJavaScript("""
@@ -188,8 +273,9 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
           try {
             const root = \(fixtureJSON)[0], a = window.moreadApp;
             window.__rendererTestInitial = true;
+            requestAnimationFrame(() => { window.__frameProbe = 1; });
             let checks = 0;
-            const check = (ok, message) => { if (!ok) throw new Error(message); checks++; };
+            const check = (ok, message) => { if (!ok) throw new Error(message); checks++; window.webkit.messageHandlers.nativeAPI.postMessage({id:'checkpoint',action:'test:checkpoint',payload:{detail:message}}); };
             const click = id => document.getElementById(id).click();
             check(document.querySelectorAll('.header-left button').length === 1, 'One sidebar button');
             check(document.querySelectorAll('.header-right button').length === 3 && !document.querySelector('.header-right select') && !document.getElementById('btn-settings') && !document.getElementById('btn-font-increase') && !document.querySelector('.status-left button'), 'Toolbar cleanup');
@@ -442,10 +528,12 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             let closed = false;
             api.confirmSaveDialog = async () => ({action:'save'});
             api.closeWindow = async () => { closed = true; return {success:true}; };
+            const failedSaveTab = a.activeTab;
             await a.loadFile(root + '/未命名.md'); await a.handleRequestClose();
-            check(a.currentFilePath === root + '/自动保存.md' && a.sourceTextareaEl.value === '# 继续保留\\n' && !closed, 'Failed save blocks file switching and window closing');
+            check(a.tabs.includes(failedSaveTab) && failedSaveTab.isEdited && failedSaveTab.rawContent === '# 继续保留\\n' && !closed, 'Opening another tab retains failed-save edits and failed save blocks window closing');
             api.confirmSaveDialog = confirmSave; api.closeWindow = closeWindow;
             api.writeFile = realWrite;
+            a.switchTab(failedSaveTab.id);
             check(await a.saveCurrentFile() && !a.isEdited, 'Manual retry recovers after auto save failure');
             click('btn-toggle-source');
             const autoHeading = a.markdownBodyEl.querySelector('h1');
@@ -468,6 +556,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             await realWrite(root + '/自动保存.md', '# 外部更新\\n'); await wait(1450);
             check(a.isEdited && a.sourceTextareaEl.value === '# 本地未保存\\n' && (await api.readFile(root + '/自动保存.md')).content === '# 外部更新\\n', 'Automatic save never overwrites detected external changes');
             api.writeFile = realWrite;
+            await (\(bugRegressionScript))(a, api, root, check);
             await a.loadFile(root + '/未命名.md');
             a.handleMenuAction('settings');
             check(a.settingsDialogEl.open, 'Settings opens');
@@ -497,6 +586,9 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
         completed = true
         timer?.invalidate()
         print(detail)
+        if CommandLine.arguments.count == 1 {
+            try? detail.write(to: Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("renderer-result.log"), atomically: true, encoding: .utf8)
+        }
         try? FileManager.default.removeItem(at: fixtures)
         exit(success ? 0 : 1)
     }
@@ -508,7 +600,7 @@ struct TestRendererSuite {
         let app = NSApplication.shared
         let delegate = RendererTests()
         app.delegate = delegate
-        app.setActivationPolicy(.accessory)
+        app.setActivationPolicy(.regular)
         app.run()
     }
 }

@@ -22,6 +22,8 @@ declare global {
 
 export interface DocumentTab {
   id: string;
+  draftId: string;
+  recoveredDraftId?: string;
   filePath: string | null;
   title: string;
   rawContent: string;
@@ -52,7 +54,13 @@ export class MoReadApp {
   private isComposing = false;
   private saveInFlight: Promise<boolean> | null = null;
   private scrollPositions: Record<string, number> = {};
-  private draftTimeout: ReturnType<typeof setTimeout> | null = null;
+  private draftTimeouts = new Map<DocumentTab, ReturnType<typeof setTimeout>>();
+  private draftOperations = new Map<DocumentTab, Promise<void>>();
+  private tabCloseRequests = new Map<DocumentTab, Promise<boolean>>();
+  private closePreparation: Promise<boolean> | null = null;
+  private closeApproval: Array<{ tab: DocumentTab; revision: number; path: string | null }> | null = null;
+  private fileOpenRequests = new Map<string, Promise<void>>();
+  private remoteImagesRenderPending = false;
   private reloadRequests = new WeakMap<DocumentTab, object>();
   private contentRenderGeneration = 0;
   private editModeRequest: DocumentTab | null = null;
@@ -371,10 +379,7 @@ export class MoReadApp {
     this.selectRemoteImagesEl.addEventListener('change', () => {
       const allowRemoteImages = this.selectRemoteImagesEl.value === 'allow';
       this.saveSetting({ allowRemoteImages });
-      if (this.activeTab && !this.isSourceMode) {
-        this.activeTab.rawContent = this.getTabContent(this.activeTab);
-        this.renderActiveTabContent();
-      }
+      this.refreshRemoteImages();
     });
 
     document.getElementById('btn-clear-drafts')?.addEventListener('click', async () => {
@@ -428,6 +433,8 @@ export class MoReadApp {
     window.addEventListener('compositionend', () => {
       this.isComposing = false;
       this.scheduleAutoSave();
+      this.scheduleDraftSave();
+      if (this.remoteImagesRenderPending) setTimeout(() => this.refreshRemoteImages(), 0);
       const deferred = this.deferredEditorAction;
       this.deferredEditorAction = null;
       if (deferred) setTimeout(() => {
@@ -562,6 +569,8 @@ export class MoReadApp {
     const openMode = this.currentSettings.openMode === 'edit';
     const tab: DocumentTab = {
       id,
+      draftId: options.draftId ?? crypto.randomUUID(),
+      recoveredDraftId: options.recoveredDraftId,
       filePath: options.filePath ?? null,
       title: options.title || (options.filePath ? options.filePath.split('/').pop()! : '未命名'),
       rawContent: options.rawContent ?? '',
@@ -574,7 +583,8 @@ export class MoReadApp {
       isReadOnly: options.isReadOnly ?? false,
       hasBOM: options.hasBOM ?? false,
       lineEnding: options.lineEnding ?? '\n',
-      revision: options.revision
+      revision: options.revision,
+      externalConflict: options.externalConflict
     };
     this.tabs.push(tab);
     return tab;
@@ -599,8 +609,22 @@ export class MoReadApp {
   }
 
   private updateDocumentEdited(): void {
-    const dirty = this.tabs?.length ? this.tabs.some(tab => tab.isEdited) : this.isEdited;
+    const dirty = this.tabs ? this.tabs.some(tab => tab.isEdited) : this.isEdited;
     window.electronAPI?.setDocumentEdited(dirty);
+  }
+
+  private refreshRemoteImages(): void {
+    if (this.isComposing) {
+      this.remoteImagesRenderPending = true;
+      return;
+    }
+    this.remoteImagesRenderPending = false;
+    const tab = this.activeTab;
+    if (tab && !tab.isSourceMode) {
+      tab.rawContent = this.getTabContent(tab);
+      tab.scrollRatio = this.getScrollRatio();
+      this.renderActiveTabContent();
+    }
   }
 
   public switchTab(tabId: string): void {
@@ -681,29 +705,49 @@ export class MoReadApp {
   public async closeTab(tabId: string): Promise<boolean> {
     const tab = this.tabs.find((t) => t.id === tabId);
     if (!tab) return true;
+    this.tabCloseRequests ??= new Map();
+    const pending = this.tabCloseRequests.get(tab);
+    if (pending) return pending;
+    const request = this.closeDocumentTab(tab).catch(error => {
+      this.showError(`关闭失败，当前修改仍保留：${String(error)}`);
+      return false;
+    });
+    this.tabCloseRequests.set(tab, request);
+    try {
+      return await request;
+    } catch (error) {
+      this.showError(`关闭失败，当前修改仍保留：${String(error)}`);
+      return false;
+    } finally {
+      this.tabCloseRequests.delete(tab);
+    }
+  }
+
+  private async closeDocumentTab(tab: DocumentTab): Promise<boolean> {
+    if (this.isComposing) return false;
+    if (this.saveInFlight && !await this.saveInFlight) return false;
+    if (!this.tabs.includes(tab)) return true;
 
     if (tab.isEdited) {
+      const revision = tab.editRevision;
+      const path = tab.filePath;
       const res = await window.electronAPI.confirmSaveDialog(tab.title);
+      if (!this.tabs.includes(tab)) return true;
+      if (tab.editRevision !== revision || tab.filePath !== path || this.isComposing) return false;
       if (res.action === 'save') {
         const saved = await this.saveTab(tab);
-        if (!saved) return false;
-      } else if (res.action === 'cancel') {
+        if (!saved || tab.isEdited) return false;
+      } else if (res.action !== 'dont-save') {
         return false;
       }
     }
-
-    // Delete draft
-    await window.electronAPI?.deleteDraft(tab.filePath || tab.id);
-
-    // Unwatch file
-    if (tab.filePath) {
-      // Keep other tabs' watchers
-    }
-
-    const index = this.tabs.findIndex((t) => t.id === tabId);
+    // Remove synchronously after the last validation; draft cleanup may await the bridge.
+    const index = this.tabs.indexOf(tab);
+    if (index < 0) return true;
+    this.cancelDraftSave(tab);
     this.tabs.splice(index, 1);
 
-    if (this.activeTabId === tabId) {
+    if (this.activeTabId === tab.id) {
       if (this.tabs.length > 0) {
         const nextTab = this.tabs[Math.max(0, index - 1)];
         this.switchTab(nextTab.id);
@@ -713,6 +757,11 @@ export class MoReadApp {
       }
     } else {
       this.renderTabBar();
+    }
+    this.updateDocumentEdited();
+    await this.deleteTabDraft(tab);
+    if (tab.filePath && !this.tabs.some(other => other.filePath === tab.filePath) && !this.fileOpenRequests?.has(tab.filePath)) {
+      await window.electronAPI?.unwatchFile?.(tab.filePath);
     }
     return true;
   }
@@ -916,8 +965,11 @@ export class MoReadApp {
           this.updateUIForMode();
         } else {
           // Safe Exit Confirmation: Save / Discard / Cancel
+          const revision = tab.editRevision;
+          const path = tab.filePath;
           const res = await window.electronAPI.confirmSaveDialog(tab.title);
           if (!this.tabs.includes(tab)) return;
+          if (tab.editRevision !== revision || tab.filePath !== path || this.isComposing) return;
           if (res.action === 'save') {
             const success = await this.saveTab(tab);
             if (success) {
@@ -932,6 +984,7 @@ export class MoReadApp {
             tab.isEditMode = false;
             this.markAsSaved(tab);
             if (this.activeTab === tab) this.renderActiveTabContent();
+            await this.deleteTabDraft(tab);
           }
           // 'cancel': remain in edit mode
         }
@@ -1063,14 +1116,30 @@ export class MoReadApp {
   // --- File Loading ---
 
   public async loadFile(filePath: string): Promise<void> {
+    this.fileOpenRequests ??= new Map();
+    const pending = this.fileOpenRequests.get(filePath);
+    if (pending) return pending;
+    const request = this.openFileTab(filePath);
+    this.fileOpenRequests.set(filePath, request);
+    try {
+      await request;
+    } catch (error) {
+      this.showError(`无法打开此文件：${String(error)}`);
+    } finally {
+      this.fileOpenRequests.delete(filePath);
+    }
+  }
+
+  private async openFileTab(filePath: string): Promise<void> {
     if (!window.electronAPI) return;
     this.cancelAutoSave();
     if (this.saveInFlight && !await this.saveInFlight) return;
 
-    if (!this.tabs) this.tabs = [];
+    const hasTabs = !!this.tabs;
 
-    // If current file has unsaved edits, confirm save before switching away to another file!
-    if (this.isEdited && this.currentFilePath && this.currentFilePath !== filePath) {
+    // A real multi-tab window retains the current document. Legacy single-document
+    // hosts still need confirmation because opening replaces their only document.
+    if (!hasTabs && this.isEdited && this.currentFilePath && this.currentFilePath !== filePath) {
       const fileName = this.currentFilePath.substring(this.currentFilePath.lastIndexOf('/') + 1) || '当前文档';
       const res = await window.electronAPI.confirmSaveDialog(fileName);
       if (res.action === 'save') {
@@ -1086,6 +1155,7 @@ export class MoReadApp {
         this.markAsSaved();
       }
     }
+    if (!this.tabs) this.tabs = [];
 
     // Check if document is already open in an existing tab!
     const existingTab = this.tabs.find((t) => t.filePath === filePath);
@@ -1105,7 +1175,6 @@ export class MoReadApp {
     this.hideError();
 
     const res = await window.electronAPI.readFile(filePath);
-    if (thisSessionId !== this.renderSessionId) return;
 
     if (!res.success || res.content === undefined) {
       this.showError(res.error || '无法打开此文件');
@@ -1129,11 +1198,12 @@ export class MoReadApp {
       scrollRatio: storedScroll
     });
 
-    this.switchTab(tab.id);
+    if (thisSessionId === this.renderSessionId || !this.activeTab) this.switchTab(tab.id);
+    else this.renderTabBar();
     this.recordRecentFile(filePath);
 
     // Update file tree active item
-    if (this.fileTreeController) {
+    if (this.fileTreeController && this.activeTab === tab) {
       this.fileTreeController.setCurrentFile(filePath);
       const parentPath = filePath.substring(0, filePath.lastIndexOf('/')) || '/';
       const rootPath = this.fileTreeRootPath && filePath.startsWith(`${this.fileTreeRootPath.replace(/\/$/, '')}/`)
@@ -1323,8 +1393,10 @@ export class MoReadApp {
       } else {
         if (isActive) this.scheduleAutoSave();
       }
-      if (unchanged) await window.electronAPI?.deleteDraft?.(filePath);
-      return unchanged;
+      if (unchanged && tab) await this.deleteTabDraft(tab);
+      else if (unchanged) await window.electronAPI?.deleteDraft?.(filePath);
+      else if (tab) this.scheduleDraftSave(tab);
+      return unchanged && revision === (tab ? tab.editRevision : this.editRevision);
     } catch (error) {
       this.pauseAutoSave(`保存失败，自动保存已暂停；当前修改仍保留：${error instanceof Error ? error.message : '请重试'}`);
       return false;
@@ -1357,14 +1429,18 @@ export class MoReadApp {
       this.renderTabBar();
       this.recordRecentFile(res.filePath);
       if (unchanged) {
-        await window.electronAPI.deleteDraft(tab.id);
-        if (originalPath) await window.electronAPI.deleteDraft(originalPath);
+        await this.deleteTabDraft(tab);
+      } else {
+        this.scheduleDraftSave(tab);
       }
       if (this.activeTab === tab) {
         this.docPathEl.textContent = res.filePath;
         this.docPathEl.title = res.filePath;
       }
-      return unchanged;
+      if (originalPath && originalPath !== res.filePath && !this.tabs.some(other => other !== tab && other.filePath === originalPath) && !this.fileOpenRequests?.has(originalPath)) {
+        await window.electronAPI.unwatchFile?.(originalPath);
+      }
+      return unchanged && tab.editRevision === revision;
     }
     return false;
   }
@@ -1385,21 +1461,62 @@ export class MoReadApp {
 
   // --- Auto-Recovery Drafts ---
 
-  private scheduleDraftSave(): void {
-    if (this.draftTimeout) clearTimeout(this.draftTimeout);
-    this.draftTimeout = setTimeout(async () => {
-      this.draftTimeout = null;
-      const tab = this.activeTab;
-      if (tab && tab.isEdited) {
-        const liveContent = tab.isSourceMode ? this.sourceTextareaEl.value : htmlToMarkdown(this.markdownBodyEl);
-        await window.electronAPI?.saveDraft({
-          id: tab.filePath || tab.id,
-          filePath: tab.filePath || undefined,
-          content: liveContent,
-          timestamp: Date.now()
-        });
+  private cancelDraftSave(tab: DocumentTab): void {
+    const timeout = this.draftTimeouts?.get(tab);
+    if (timeout) clearTimeout(timeout);
+    this.draftTimeouts?.delete(tab);
+  }
+
+  private queueDraftOperation(tab: DocumentTab, operation: () => Promise<void>): Promise<void> {
+    this.draftOperations ??= new Map();
+    const previous = this.draftOperations.get(tab) ?? Promise.resolve();
+    const pending = previous.then(operation).catch(error => {
+      this.showError(`恢复草稿处理失败：${String(error)}`);
+    });
+    this.draftOperations.set(tab, pending);
+    void pending.then(() => {
+      if (this.draftOperations.get(tab) === pending) this.draftOperations.delete(tab);
+    });
+    return pending;
+  }
+
+  private deleteTabDraft(tab: DocumentTab): Promise<void> {
+    this.cancelDraftSave(tab);
+    return this.queueDraftOperation(tab, async () => {
+      await window.electronAPI?.deleteDraft?.(tab.draftId);
+      if (tab.recoveredDraftId) {
+        await window.electronAPI?.deleteDraft?.(tab.recoveredDraftId);
+        tab.recoveredDraftId = undefined;
       }
-    }, 1500);
+    });
+  }
+
+  private scheduleDraftSave(tab = this.activeTab): void {
+    if (!tab || !tab.isEdited) return;
+    this.cancelDraftSave(tab);
+    this.draftTimeouts ??= new Map();
+    this.draftTimeouts.set(tab, setTimeout(() => {
+      this.draftTimeouts.delete(tab);
+      if (!this.tabs.includes(tab) || !tab.isEdited || (this.activeTab === tab && this.isComposing)) return;
+      const draft = {
+        id: tab.draftId,
+        filePath: tab.filePath || undefined,
+        content: this.getTabContent(tab),
+        savedContent: tab.savedContent,
+        revision: tab.revision,
+        hasBOM: tab.hasBOM,
+        lineEnding: tab.lineEnding,
+        timestamp: Date.now()
+      };
+      void this.queueDraftOperation(tab, async () => {
+        const result = await window.electronAPI?.saveDraft(draft);
+        if (result?.success === false) throw new Error('无法保存恢复草稿');
+        if (result?.success && tab.recoveredDraftId) {
+          await window.electronAPI?.deleteDraft(tab.recoveredDraftId);
+          tab.recoveredDraftId = undefined;
+        }
+      });
+    }, 1500));
   }
 
   private async checkCrashRecoveryDrafts(): Promise<void> {
@@ -1422,7 +1539,18 @@ export class MoReadApp {
       li.className = 'recent-item';
       const name = d.filePath ? d.filePath.split('/').pop()! : '未命名草稿';
       const time = new Date(d.timestamp).toLocaleString();
-      li.innerHTML = `<span><strong>${name}</strong> (${time})</span><span class="recent-item-path">${d.filePath || '未关联文件'}</span>`;
+      const heading = document.createElement('span');
+      const title = document.createElement('strong');
+      title.textContent = name;
+      const date = document.createElement('span');
+      date.textContent = ` (${time})`;
+      heading.appendChild(title);
+      heading.appendChild(date);
+      const path = document.createElement('span');
+      path.className = 'recent-item-path';
+      path.textContent = d.filePath || '未关联文件';
+      li.appendChild(heading);
+      li.appendChild(path);
       this.draftRecoveryListEl.appendChild(li);
     }
   }
@@ -1431,15 +1559,33 @@ export class MoReadApp {
     const res = await window.electronAPI?.getAllDrafts();
     if (!res || !res.drafts) return;
     for (const d of res.drafts) {
+      if (this.tabs.some(tab => tab.recoveredDraftId === d.id || tab.draftId === d.id)) continue;
+      // Old drafts have no trustworthy disk baseline. Keep them as detached copies.
+      const filePath = typeof d.savedContent === 'string' ? d.filePath || null : null;
+      const existing = filePath ? this.tabs.find(tab => tab.filePath === filePath) : undefined;
+      let disk: Awaited<ReturnType<BridgeAPI['readFile']>> | undefined;
+      if (filePath && !existing) {
+        try { disk = await window.electronAPI.readFile(filePath); }
+        catch { disk = { success: false }; }
+      }
+      if (this.tabs.some(tab => tab.recoveredDraftId === d.id || tab.draftId === d.id)) continue;
       const tab = this.createTab({
-        filePath: d.filePath || null,
+        filePath: existing ? null : filePath,
+        recoveredDraftId: d.id,
         title: d.filePath ? d.filePath.split('/').pop()! : '已恢复草稿',
         rawContent: d.content,
-        savedContent: '',
+        savedContent: d.savedContent ?? '',
+        hasBOM: d.hasBOM,
+        lineEnding: d.lineEnding,
+        revision: d.revision,
+        isReadOnly: disk?.stats?.isReadOnly,
+        externalConflict: !!filePath && !existing && (!disk?.success || disk.content !== d.savedContent),
         isEdited: true,
         isEditMode: true
       });
       this.switchTab(tab.id);
+      this.scheduleDraftSave(tab);
+      if (d.filePath && !tab.filePath) this.showError('该草稿缺少原始版本记录或同名文件已打开，已恢复为独立副本；请使用“另存为”保存。');
     }
   }
 
@@ -1521,27 +1667,72 @@ export class MoReadApp {
 
   // --- Window Close Handling ---
 
-  public async handleRequestClose(): Promise<void> {
-    this.cancelAutoSave();
-    if (this.saveInFlight && !await this.saveInFlight) return;
+  public async prepareToClose(): Promise<boolean> {
+    if (this.closePreparation) return this.closePreparation;
+    this.closeApproval = null;
+    const request = this.confirmWindowDocuments().catch(error => {
+      this.showError(`关闭失败，当前修改仍保留：${String(error)}`);
+      return false;
+    });
+    this.closePreparation = request;
+    try {
+      return await request;
+    } catch (error) {
+      this.showError(`关闭失败，当前修改仍保留：${String(error)}`);
+      return false;
+    } finally {
+      this.closePreparation = null;
+      if (!this.closeApproval) this.scheduleAutoSave();
+    }
+  }
 
-    if (this.tabs && this.tabs.length > 0) {
-      const dirtyTabs = this.tabs.filter((t) => t.isEdited);
-      for (const tab of dirtyTabs) {
-        this.switchTab(tab.id);
-        const res = await window.electronAPI?.confirmSaveDialog(tab.title);
-        if (res?.action === 'save') {
-          const saved = await this.saveTab(tab);
-          if (!saved) return;
-        } else if (res?.action === 'cancel') {
-          return;
-        }
+  public isPreparedToClose(): boolean {
+    return !!this.closeApproval && !this.isComposing &&
+      !this.fileOpenRequests?.size &&
+      this.tabs.length === this.closeApproval.length &&
+      this.closeApproval.every(({ tab, revision, path }) =>
+        this.tabs.includes(tab) && tab.editRevision === revision && tab.filePath === path);
+  }
+
+  public cancelClosePreparation(): void {
+    this.closeApproval = null;
+    this.scheduleAutoSave();
+  }
+
+  private async confirmWindowDocuments(): Promise<boolean> {
+    this.cancelAutoSave();
+    if (this.isComposing || (this.saveInFlight && !await this.saveInFlight)) return false;
+    const snapshot = this.tabs.map(tab => ({ tab, revision: tab.editRevision, path: tab.filePath }));
+    for (const state of snapshot) {
+      const { tab, revision, path } = state;
+      if (!this.tabs.includes(tab) || tab.editRevision !== revision || tab.filePath !== path) return false;
+      if (!tab.isEdited) continue;
+      const res = await window.electronAPI?.confirmSaveDialog(tab.title);
+      if (!this.tabs.includes(tab) || tab.editRevision !== revision || tab.filePath !== path || this.isComposing) return false;
+      if (res?.action === 'save') {
+        if (!await this.saveTab(tab) || tab.isEdited) return false;
+        state.path = tab.filePath;
+      } else if (res?.action !== 'dont-save') {
+        return false;
       }
-      await window.electronAPI?.closeWindow();
+    }
+    this.closeApproval = snapshot;
+    if (!this.isPreparedToClose()) {
+      this.closeApproval = null;
+      return false;
+    }
+    return true;
+  }
+
+  public async handleRequestClose(): Promise<void> {
+    if (this.tabs) {
+      if (await this.prepareToClose() && this.isPreparedToClose()) await window.electronAPI?.closeWindow();
       return;
     }
 
     // Fallback for headless / single document instance without initialized tabs
+    this.cancelAutoSave();
+    if (this.saveInFlight && !await this.saveInFlight) return;
     if (this.isEdited && this.currentFilePath) {
       const fileName = this.currentFilePath.substring(this.currentFilePath.lastIndexOf('/') + 1) || '当前文档';
       const res = await window.electronAPI?.confirmSaveDialog(fileName);
@@ -1595,6 +1786,7 @@ export class MoReadApp {
     const tab = targetTab ?? this.activeTab;
     if (tab) {
       tab.isEdited = false;
+      this.cancelDraftSave(tab);
     } else {
       this._isEdited = false;
     }
