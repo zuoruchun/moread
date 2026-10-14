@@ -24,14 +24,20 @@
       </div>
 
       <div class="header-right">
-        <!-- Edit Mode Toggle -->
-        <button id="btn-toggle-edit" class="btn-icon" title="切换阅读 / 编辑模式 (Cmd+E)">编辑</button>
+        <div class="toolbar-segmented" role="group" aria-label="文档模式">
+          <button id="btn-mode-read" class="segment-button" aria-pressed="true" title="阅读模式 (Cmd+E)">阅读</button>
+          <button id="btn-toggle-edit" class="segment-button" aria-pressed="false" title="编辑模式 (Cmd+E)">编辑</button>
+        </div>
 
-        <!-- Source View Toggle -->
-        <button id="btn-toggle-source" class="btn-icon" title="切换源码 / 渲染 (Cmd+Shift+S)">源码</button>
+        <div class="toolbar-segmented" role="group" aria-label="文档视图">
+          <button id="btn-view-rendered" class="segment-button" aria-pressed="true" title="显示正文 (Cmd+Shift+S)">正文</button>
+          <button id="btn-toggle-source" class="segment-button" aria-pressed="false" title="显示源码 (Cmd+Shift+S)">源码</button>
+        </div>
 
         <!-- Search Button -->
-        <button id="btn-search" class="btn-icon" title="在文档内查找 (Cmd+F)">🔍</button>
+        <button id="btn-search" class="btn-icon" title="在文档内查找 (Cmd+F)" aria-label="在文档内查找">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+        </button>
       </div>
     </header>
 
@@ -134,13 +140,15 @@
     <footer class="app-status-bar">
       <div class="status-left">
         <span id="status-mode" class="status-mode">[阅读模式]</span>
-        <span id="status-save-badge" class="status-save-badge" style="display: none;">[已保存]</span>
+        <span id="status-save-policy" class="status-save-policy">手动保存</span>
+        <span id="status-save-badge" class="status-save-badge" role="status" aria-live="polite">未打开文件</span>
+        <span id="status-draft-backup" class="status-draft-backup" role="status" aria-live="polite"></span>
         <span id="status-encoding">UTF-8</span>
         <span id="status-file-size">-</span>
       </div>
       <div class="status-right">
         <span id="status-stats">0 字符 · 0 行</span>
-        <span>MoRead v1.5.5</span>
+        <span class="status-version">MoRead v1.5.6</span>
       </div>
     </footer>
   </div>
@@ -174,7 +182,10 @@
       </label>
       <div class="settings-row">
         <span>本地恢复草稿</span>
-        <button id="btn-clear-drafts" class="btn-secondary" style="font-size: 12px; padding: 4px 10px;">清理所有草稿</button>
+        <div class="settings-draft-actions">
+          <button id="btn-manage-drafts" class="btn-secondary btn-sm">查看草稿</button>
+          <button id="btn-clear-drafts" class="btn-secondary btn-sm">清理所有草稿</button>
+        </div>
       </div>
     </section>
 
@@ -190,13 +201,21 @@
   </dialog>
 
   <!-- Draft Recovery Dialog -->
-  <dialog id="draft-recovery-dialog" class="settings-dialog" aria-labelledby="draft-recovery-title">
-    <div class="settings-heading"><h2 id="draft-recovery-title">恢复未保存草稿</h2><button id="btn-close-drafts" class="btn-icon" aria-label="关闭">✕</button></div>
-    <p class="settings-save-hint" style="margin-top: 4px; font-size: 13px;">检测到上次应用退出前保存的文档恢复草稿：</p>
-    <ul id="draft-recovery-list" class="recent-list" style="max-height: 200px; overflow-y: auto; margin: 12px 0;"></ul>
-    <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px;">
-      <button id="btn-discard-drafts" class="btn-secondary">丢弃草稿</button>
-      <button id="btn-recover-drafts" class="btn-primary">恢复草稿</button>
+  <dialog id="draft-recovery-dialog" class="settings-dialog draft-recovery-dialog" aria-labelledby="draft-recovery-title" aria-describedby="draft-recovery-description">
+    <div class="settings-heading"><h2 id="draft-recovery-title">恢复草稿</h2><button id="btn-close-drafts" class="btn-icon" aria-label="稍后处理草稿">✕</button></div>
+    <p id="draft-recovery-description" class="settings-save-hint">先预览，再勾选需要恢复的文档。恢复草稿不会立即覆盖原文件；稍后仍可在设置中查看。</p>
+    <div class="draft-recovery-content">
+      <ul id="draft-recovery-list" class="draft-recovery-list" aria-label="可恢复的草稿"></ul>
+      <section class="draft-preview-panel" aria-labelledby="draft-recovery-preview-title">
+        <h3 id="draft-recovery-preview-title">选择草稿以预览</h3>
+        <p id="draft-recovery-preview-path" class="draft-preview-path"></p>
+        <pre id="draft-recovery-preview" class="draft-preview-content" tabindex="0" aria-label="草稿文本预览"></pre>
+      </section>
+    </div>
+    <p id="draft-recovery-status" class="draft-recovery-status" role="status" aria-live="polite"></p>
+    <div class="draft-recovery-actions">
+      <button id="btn-later-drafts" class="btn-secondary">稍后处理</button>
+      <button id="btn-recover-drafts" class="btn-primary" disabled>恢复所选</button>
     </div>
   </dialog>
 

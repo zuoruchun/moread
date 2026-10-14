@@ -6,7 +6,7 @@ import { bindMathEditing, setMathEditingEnabled } from './modules/mathEditing.ts
 import { OutlineController } from './modules/outline.ts';
 import { SearchController } from './modules/search.ts';
 import { FileTreeController } from './modules/fileTree.ts';
-import { initNativeBridge, BridgeAPI } from './modules/bridge.ts';
+import { initNativeBridge, BridgeAPI, type RecoveryDraft } from './modules/bridge.ts';
 
 // Initialize bridge (supports both WKWebView Native and Electron)
 initNativeBridge();
@@ -24,6 +24,7 @@ export interface DocumentTab {
   id: string;
   draftId: string;
   recoveredDraftId?: string;
+  recoveredDraft?: RecoveryDraft;
   filePath: string | null;
   title: string;
   rawContent: string;
@@ -38,6 +39,10 @@ export interface DocumentTab {
   lineEnding: '\n' | '\r\n';
   revision?: string;
   externalConflict?: boolean;
+  saveState?: 'saving' | 'failed';
+  autoSavePaused?: boolean;
+  draftSavedRevision?: number;
+  draftBackupFailed?: boolean;
 }
 
 export class MoReadApp {
@@ -46,7 +51,12 @@ export class MoReadApp {
 
   public currentSettings: any = {};
   public renderSessionId: number = 0;
-  private savedBadgeTimeout: ReturnType<typeof setTimeout> | null = null;
+  private fallbackSaveState?: 'saving' | 'failed';
+  private recoveryDrafts: RecoveryDraft[] = [];
+  private selectedDraftIds = new Set<string>();
+  private recoveryRequestId = 0;
+  private recoveryBusy = false;
+  private previewDraftId?: string;
   private fileTreeRootPath: string | null = null;
   private folderRequestId = 0;
   private autoSaveTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -64,7 +74,7 @@ export class MoReadApp {
   private reloadRequests = new WeakMap<DocumentTab, object>();
   private contentRenderGeneration = 0;
   private editModeRequest: DocumentTab | null = null;
-  private deferredEditorAction: { tab: DocumentTab; action: 'source' | 'edit' } | null = null;
+  private deferredEditorAction: { tab: DocumentTab; action: 'source' | 'edit'; enabled?: boolean } | null = null;
 
   // Controllers
   public outlineController!: OutlineController;
@@ -101,6 +111,10 @@ export class MoReadApp {
   public statusStatsEl!: HTMLElement;
   public statusModeBtnEl!: HTMLElement;
   public statusSaveBadgeEl!: HTMLElement;
+  public statusSavePolicyEl!: HTMLElement;
+  public statusDraftBackupEl!: HTMLElement;
+  public btnModeReadEl!: HTMLButtonElement;
+  public btnViewRenderedEl!: HTMLButtonElement;
 
   // Header Elements
   public selectThemeEl!: HTMLSelectElement;
@@ -192,6 +206,7 @@ export class MoReadApp {
     this.initElements();
     this.initControllers();
     this.initEventListeners();
+    this.updateUIForMode();
     this.initApp();
     window.moreadApp = this;
     window.prepareForPDFExport = () => this.prepareForPDFExport();
@@ -225,6 +240,10 @@ export class MoReadApp {
     this.statusStatsEl = document.getElementById('status-stats')!;
     this.statusModeBtnEl = document.getElementById('status-mode')!;
     this.statusSaveBadgeEl = document.getElementById('status-save-badge')!;
+    this.statusSavePolicyEl = document.getElementById('status-save-policy')!;
+    this.statusDraftBackupEl = document.getElementById('status-draft-backup')!;
+    this.btnModeReadEl = document.getElementById('btn-mode-read') as HTMLButtonElement;
+    this.btnViewRenderedEl = document.getElementById('btn-view-rendered') as HTMLButtonElement;
 
     this.selectThemeEl = document.getElementById('select-theme') as HTMLSelectElement;
     this.selectWidthEl = document.getElementById('select-reading-width') as HTMLSelectElement;
@@ -337,8 +356,10 @@ export class MoReadApp {
 
     // Toolbar actions
     this.btnToggleSidebarEl.addEventListener('click', () => this.toggleSidebar());
-    this.btnToggleEditEl.addEventListener('click', () => this.toggleEditMode());
-    this.btnToggleSourceEl.addEventListener('click', () => this.toggleSourceView());
+    this.btnToggleEditEl.addEventListener('click', () => this.setEditMode(true));
+    this.btnModeReadEl.addEventListener('click', () => this.setEditMode(false));
+    this.btnToggleSourceEl.addEventListener('click', () => this.setSourceMode(true));
+    this.btnViewRenderedEl.addEventListener('click', () => this.setSourceMode(false));
     document.getElementById('btn-search')?.addEventListener('click', () => this.openSearch());
 
     // Settings actions
@@ -383,9 +404,21 @@ export class MoReadApp {
     });
 
     document.getElementById('btn-clear-drafts')?.addEventListener('click', async () => {
-      await window.electronAPI?.clearDrafts();
-      this.showError('已清理所有本地崩溃恢复草稿');
-      setTimeout(() => this.hideError(), 2500);
+      if (!confirm('清理所有恢复草稿？此操作不能撤销，不会删除原文件。')) return;
+      try {
+        const result = await window.electronAPI?.clearDrafts();
+        if (!result?.success) throw new Error('清理失败，请重试');
+        for (const tab of this.tabs) {
+          tab.draftSavedRevision = undefined;
+          this.scheduleDraftSave(tab);
+        }
+        this.updateSaveStatus();
+        this.showError('已清理恢复草稿；正在编辑的文档会继续自动备份');
+      } catch (error) { this.showError(`无法清理草稿：${String(error)}`); }
+    });
+    document.getElementById('btn-manage-drafts')?.addEventListener('click', () => {
+      this.settingsDialogEl.close();
+      void this.checkCrashRecoveryDrafts(true);
     });
 
     // Lightbox events
@@ -397,6 +430,7 @@ export class MoReadApp {
       this.conflictBannerEl.classList.add('hidden');
       this.conflictBannerEl.style.display = 'none';
       if (this.activeTab) this.activeTab.externalConflict = false;
+      this.updateSaveStatus();
     });
 
     document.getElementById('btn-conflict-reload')?.addEventListener('click', async () => {
@@ -417,13 +451,11 @@ export class MoReadApp {
     document.getElementById('btn-close-drafts')?.addEventListener('click', () => {
       this.draftRecoveryDialogEl.close();
     });
-    document.getElementById('btn-discard-drafts')?.addEventListener('click', async () => {
-      await window.electronAPI?.clearDrafts();
+    document.getElementById('btn-later-drafts')?.addEventListener('click', () => {
       this.draftRecoveryDialogEl.close();
     });
     document.getElementById('btn-recover-drafts')?.addEventListener('click', async () => {
-      await this.recoverAllDrafts();
-      this.draftRecoveryDialogEl.close();
+      await this.recoverSelectedDrafts();
     });
 
     window.addEventListener('compositionstart', () => {
@@ -439,8 +471,11 @@ export class MoReadApp {
       this.deferredEditorAction = null;
       if (deferred) setTimeout(() => {
         if (this.activeTab === deferred.tab && !this.isComposing) {
-          if (deferred.action === 'source') this.toggleSourceView();
-          else void this.toggleEditMode();
+          if (deferred.action === 'source') {
+            if (deferred.enabled === undefined) this.toggleSourceView();
+            else this.setSourceMode(deferred.enabled);
+          } else if (deferred.enabled === undefined) void this.toggleEditMode();
+          else void this.setEditMode(deferred.enabled);
         }
       }, 0);
     });
@@ -571,6 +606,7 @@ export class MoReadApp {
       id,
       draftId: options.draftId ?? crypto.randomUUID(),
       recoveredDraftId: options.recoveredDraftId,
+      recoveredDraft: options.recoveredDraft,
       filePath: options.filePath ?? null,
       title: options.title || (options.filePath ? options.filePath.split('/').pop()! : '未命名'),
       rawContent: options.rawContent ?? '',
@@ -645,8 +681,10 @@ export class MoReadApp {
     const tab = this.activeTab;
     if (!tab) return;
 
+    this.autoSavePaused = tab.autoSavePaused === true;
     this.renderTabBar();
     this.renderActiveTabContent();
+    this.updateSaveStatus();
   }
 
   public renderTabBar(): void {
@@ -880,12 +918,32 @@ export class MoReadApp {
     this.searchController?.refresh();
     this.renderTabBar();
     this.updateDocumentEdited();
+    this.updateUIForMode();
   }
 
   // --- Read vs Edit Mode ---
 
   public updateUIForMode(): void {
     const tab = this.activeTab;
+    const controls: Array<[HTMLButtonElement | undefined, boolean]> = [
+      [this.btnModeReadEl, !!tab && !tab.isEditMode],
+      [this.btnToggleEditEl, !!tab?.isEditMode],
+      [this.btnViewRenderedEl, !!tab && !tab.isSourceMode],
+      [this.btnToggleSourceEl, !!tab?.isSourceMode]
+    ];
+    for (const [button, selected] of controls) {
+      if (!button) continue;
+      button.disabled = !tab;
+      button.setAttribute?.('aria-pressed', String(selected));
+      if (selected) button.classList.add('active');
+      else button.classList.remove('active');
+    }
+    if (typeof document !== 'undefined') {
+      const search = document.getElementById?.('btn-search') as HTMLButtonElement | null;
+      if (search) search.disabled = !tab;
+    }
+    if (this.statusModeBtnEl && !tab) this.statusModeBtnEl.textContent = '';
+    this.updateSaveStatus();
     if (!tab) return;
     if (this.markdownBodyEl) setMathEditingEnabled(this.markdownBodyEl, tab.isEditMode);
 
@@ -897,7 +955,7 @@ export class MoReadApp {
       if (this.markdownBodyEl) this.markdownBodyEl.contentEditable = 'true';
       if (this.sourceTextareaEl) this.sourceTextareaEl.readOnly = false;
       if (this.btnToggleEditEl) {
-        this.btnToggleEditEl.textContent = '结束编辑';
+        this.btnToggleEditEl.textContent = '编辑';
         this.btnToggleEditEl.classList.add('active');
       }
       if (this.statusModeBtnEl) this.statusModeBtnEl.textContent = tab.isSourceMode ? '[编辑源码]' : '[所见即所得]';
@@ -918,7 +976,7 @@ export class MoReadApp {
     if (tab.isSourceMode) {
       if (this.btnToggleSourceEl) {
         this.btnToggleSourceEl.classList.add('active');
-        this.btnToggleSourceEl.textContent = '预览';
+        this.btnToggleSourceEl.textContent = '源码';
       }
       if (this.markdownScrollWrapperEl) {
         this.markdownScrollWrapperEl.classList.add('hidden');
@@ -943,6 +1001,26 @@ export class MoReadApp {
       }
     }
     this.searchController?.refresh();
+  }
+
+  public async setEditMode(enabled: boolean): Promise<void> {
+    const tab = this.activeTab;
+    if (!tab) return;
+    if (this.isComposing) {
+      this.deferredEditorAction = { tab, action: 'edit', enabled };
+      return;
+    }
+    if (tab.isEditMode !== enabled) await this.toggleEditMode();
+  }
+
+  public setSourceMode(enabled: boolean): void {
+    const tab = this.activeTab;
+    if (!tab) return;
+    if (this.isComposing) {
+      this.deferredEditorAction = { tab, action: 'source', enabled };
+      return;
+    }
+    if (tab.isSourceMode !== enabled) this.toggleSourceView();
   }
 
   public async toggleEditMode(): Promise<void> {
@@ -1316,6 +1394,7 @@ export class MoReadApp {
     }
 
     if (tab.isReadOnly) {
+      this.setSaveState('failed', tab);
       this.showError('该文件在磁盘上为只读，无法直接写入。请使用“另存为”保存副本。');
       return false;
     }
@@ -1342,11 +1421,13 @@ export class MoReadApp {
   }
 
   private async writeDocumentSnapshot(filePath: string, revision: number, baseline: string, contentToSave: string, tab?: DocumentTab): Promise<boolean> {
+    this.setSaveState('saving', tab);
     try {
       const disk = await window.electronAPI.readFile(filePath);
       if (!disk.success || disk.content !== baseline) {
         if (tab) tab.externalConflict = true;
-        this.pauseAutoSave(disk.error || '文件已在外部修改，保存已停止；当前修改仍保留，请先处理磁盘上的新版本。');
+        this.setSaveState('failed', tab);
+        this.pauseAutoSave(disk.error || '文件已在外部修改，保存已停止；当前修改仍保留，请先处理磁盘上的新版本。', tab);
         return false;
       }
 
@@ -1360,7 +1441,8 @@ export class MoReadApp {
         : window.electronAPI.writeFile(filePath, contentToSave, disk.stats?.revision));
 
       if (!res.success) {
-        this.pauseAutoSave(res.error || '保存文件失败，当前修改仍保留；可使用 Cmd+S 重试。');
+        this.setSaveState('failed', tab);
+        this.pauseAutoSave(res.error || '保存文件失败，当前修改仍保留；可使用 Cmd+S 重试。', tab);
         return false;
       }
 
@@ -1371,6 +1453,7 @@ export class MoReadApp {
         tab.savedContent = contentToSave;
         tab.revision = res.stats?.revision;
         tab.externalConflict = false;
+        tab.autoSavePaused = false;
       } else {
         this.lastSavedContent = contentToSave;
       }
@@ -1398,8 +1481,11 @@ export class MoReadApp {
       else if (tab) this.scheduleDraftSave(tab);
       return unchanged && revision === (tab ? tab.editRevision : this.editRevision);
     } catch (error) {
-      this.pauseAutoSave(`保存失败，自动保存已暂停；当前修改仍保留：${error instanceof Error ? error.message : '请重试'}`);
+      this.setSaveState('failed', tab);
+      this.pauseAutoSave(`保存失败，自动保存已暂停；当前修改仍保留：${error instanceof Error ? error.message : '请重试'}`, tab);
       return false;
+    } finally {
+      if ((tab ? tab.saveState : this.fallbackSaveState) === 'saving') this.setSaveState(undefined, tab);
     }
   }
 
@@ -1411,38 +1497,58 @@ export class MoReadApp {
     const content = this.getTabContent(tab);
     const revision = tab.editRevision;
     const originalPath = tab.filePath;
-    const res = await window.electronAPI.saveAsDialog(tab.filePath || undefined, content, { hasBOM: tab.hasBOM, lineEnding: tab.lineEnding });
-    if (res.success === false) {
-      this.showError(res.error || '另存为失败，当前修改仍保留');
+    if (tab.saveState === 'saving') return false;
+    const previousState = tab.saveState;
+    this.setSaveState('saving', tab);
+    try {
+      const res = await window.electronAPI.saveAsDialog(tab.filePath || undefined, content, { hasBOM: tab.hasBOM, lineEnding: tab.lineEnding });
+      if (res.success === false) {
+        this.setSaveState('failed', tab);
+        this.showError(res.error || '另存为失败，当前修改仍保留');
+        return false;
+      }
+      if (res.canceled) {
+        this.setSaveState(previousState, tab);
+        return false;
+      }
+      if (!res.canceled && res.filePath && this.tabs.includes(tab) && tab.filePath === originalPath) {
+        tab.filePath = res.filePath;
+        tab.title = res.filePath.split('/').pop() || '未命名';
+        tab.savedContent = content;
+        tab.revision = res.stats?.revision;
+        tab.externalConflict = false;
+        tab.isReadOnly = false;
+        tab.autoSavePaused = false;
+        if (this.activeTab === tab) this.autoSavePaused = false;
+        const unchanged = tab.editRevision === revision;
+        if (unchanged) {
+          tab.rawContent = content;
+          this.markAsSaved(tab);
+        }
+        this.renderTabBar();
+        this.recordRecentFile(res.filePath);
+        if (unchanged) {
+          await this.deleteTabDraft(tab);
+        } else {
+          this.scheduleDraftSave(tab);
+        }
+        if (this.activeTab === tab) {
+          this.docPathEl.textContent = res.filePath;
+          this.docPathEl.title = res.filePath;
+        }
+        if (originalPath && originalPath !== res.filePath && !this.tabs.some(other => other !== tab && other.filePath === originalPath) && !this.fileOpenRequests?.has(originalPath)) {
+          await window.electronAPI.unwatchFile?.(originalPath);
+        }
+        return unchanged && tab.editRevision === revision;
+      }
       return false;
+    } catch (error) {
+      this.setSaveState('failed', tab);
+      this.showError(`另存为失败，当前修改仍保留：${error instanceof Error ? error.message : '请重试'}`);
+      return false;
+    } finally {
+      if ((tab.saveState as DocumentTab['saveState']) === 'saving') this.setSaveState(undefined, tab);
     }
-    if (!res.canceled && res.filePath && this.tabs.includes(tab) && tab.filePath === originalPath) {
-      tab.filePath = res.filePath;
-      tab.title = res.filePath.split('/').pop() || '未命名';
-      tab.savedContent = content;
-      tab.revision = res.stats?.revision;
-      const unchanged = tab.editRevision === revision;
-      if (unchanged) {
-        tab.rawContent = content;
-        this.markAsSaved(tab);
-      }
-      this.renderTabBar();
-      this.recordRecentFile(res.filePath);
-      if (unchanged) {
-        await this.deleteTabDraft(tab);
-      } else {
-        this.scheduleDraftSave(tab);
-      }
-      if (this.activeTab === tab) {
-        this.docPathEl.textContent = res.filePath;
-        this.docPathEl.title = res.filePath;
-      }
-      if (originalPath && originalPath !== res.filePath && !this.tabs.some(other => other !== tab && other.filePath === originalPath) && !this.fileOpenRequests?.has(originalPath)) {
-        await window.electronAPI.unwatchFile?.(originalPath);
-      }
-      return unchanged && tab.editRevision === revision;
-    }
-    return false;
   }
 
   public async handleSaveCopy(): Promise<boolean> {
@@ -1484,11 +1590,17 @@ export class MoReadApp {
     this.cancelDraftSave(tab);
     return this.queueDraftOperation(tab, async () => {
       await window.electronAPI?.deleteDraft?.(tab.draftId);
-      if (tab.recoveredDraftId) {
-        await window.electronAPI?.deleteDraft?.(tab.recoveredDraftId);
-        tab.recoveredDraftId = undefined;
-      }
+      await this.removeRecoveredDraft(tab);
     });
+  }
+
+  private async removeRecoveredDraft(tab: DocumentTab): Promise<void> {
+    if (!tab.recoveredDraftId) return;
+    const result = await window.electronAPI?.deleteDraft?.(tab.recoveredDraftId, tab.recoveredDraft);
+    if (result?.success === false && !result.conflict) throw new Error('无法清理旧恢复草稿');
+    // An updated draft belongs to another snapshot; leave it available for later recovery.
+    tab.recoveredDraftId = undefined;
+    tab.recoveredDraft = undefined;
   }
 
   private scheduleDraftSave(tab = this.activeTab): void {
@@ -1498,6 +1610,7 @@ export class MoReadApp {
     this.draftTimeouts.set(tab, setTimeout(() => {
       this.draftTimeouts.delete(tab);
       if (!this.tabs.includes(tab) || !tab.isEdited || (this.activeTab === tab && this.isComposing)) return;
+      const revision = tab.editRevision;
       const draft = {
         id: tab.draftId,
         filePath: tab.filePath || undefined,
@@ -1509,84 +1622,227 @@ export class MoReadApp {
         timestamp: Date.now()
       };
       void this.queueDraftOperation(tab, async () => {
-        const result = await window.electronAPI?.saveDraft(draft);
-        if (result?.success === false) throw new Error('无法保存恢复草稿');
+        let result;
+        try {
+          result = await window.electronAPI?.saveDraft(draft);
+          if (result?.success === false) throw new Error('无法保存恢复草稿');
+          if (result?.success) {
+            tab.draftSavedRevision = revision;
+            tab.draftBackupFailed = false;
+          }
+        } catch (error) {
+          tab.draftBackupFailed = true;
+          throw error;
+        } finally {
+          this.updateSaveStatus();
+        }
         if (result?.success && tab.recoveredDraftId) {
-          await window.electronAPI?.deleteDraft(tab.recoveredDraftId);
-          tab.recoveredDraftId = undefined;
+          await this.removeRecoveredDraft(tab);
         }
       });
     }, 1500));
   }
 
-  private async checkCrashRecoveryDrafts(): Promise<void> {
+  private isDraftOpen(id: string): boolean {
+    return this.tabs.some(tab => tab.recoveredDraftId === id || tab.draftId === id);
+  }
+
+  private sameDraft(a: RecoveryDraft, b: RecoveryDraft): boolean {
+    const keys: Array<keyof RecoveryDraft> = ['id', 'filePath', 'content', 'timestamp', 'savedContent', 'revision', 'hasBOM', 'lineEnding'];
+    return keys.every(key => a[key] === b[key]);
+  }
+
+  private setRecoveryStatus(message: string): void {
+    const status = document.getElementById('draft-recovery-status');
+    if (status) status.textContent = message;
+  }
+
+  private async checkCrashRecoveryDrafts(showEmpty = false, openDialog = true): Promise<void> {
     if (!window.electronAPI?.getAllDrafts) return;
+    const request = this.recoveryRequestId = (this.recoveryRequestId || 0) + 1;
     try {
       const res = await window.electronAPI.getAllDrafts();
-      if (res && res.drafts && res.drafts.length > 0) {
-        this.renderDraftRecoveryList(res.drafts);
-        this.draftRecoveryDialogEl.showModal();
-      }
-    } catch (e) {
-      console.warn('Failed to inspect drafts:', e);
+      if (request !== this.recoveryRequestId) return;
+      const drafts = res.drafts.filter(draft => !this.isDraftOpen(draft.id));
+      this.renderDraftRecoveryList(drafts);
+      if (openDialog && (drafts.length || showEmpty) && !this.draftRecoveryDialogEl.open) this.draftRecoveryDialogEl.showModal();
+    } catch (error) {
+      if (showEmpty) {
+        this.setRecoveryStatus(`无法读取草稿：${String(error)}`);
+        if (!this.draftRecoveryDialogEl.open) this.draftRecoveryDialogEl.showModal();
+      } else console.warn('Failed to inspect drafts:', error);
     }
   }
 
-  private renderDraftRecoveryList(drafts: Array<{ id: string; filePath?: string; content: string; timestamp: number }>): void {
+  private previewDraft(draft?: RecoveryDraft): void {
+    this.previewDraftId = draft?.id;
+    const title = document.getElementById('draft-recovery-preview-title');
+    const path = document.getElementById('draft-recovery-preview-path');
+    const preview = document.getElementById('draft-recovery-preview');
+    if (title) title.textContent = draft ? draft.filePath?.split('/').pop() || '未命名草稿' : '选择草稿以预览';
+    if (path) path.textContent = draft?.filePath || (draft ? '未关联文件 · 恢复后请另存为' : '');
+    // Plain text only: draft Markdown/HTML must never execute or fetch remote resources here.
+    if (preview) preview.textContent = draft ? draft.content.slice(0, 20000) + (draft.content.length > 20000 ? '\n…（仅预览前 20,000 字符，恢复时保留全文）' : '') : '';
+    this.draftRecoveryListEl.querySelectorAll<HTMLElement>('[data-draft-id]').forEach(row => {
+      row.classList.toggle('previewing', row.dataset.draftId === draft?.id);
+    });
+  }
+
+  private updateRecoverySelection(): void {
+    const button = document.getElementById('btn-recover-drafts') as HTMLButtonElement | null;
+    const count = this.selectedDraftIds?.size || 0;
+    if (button) {
+      button.disabled = this.recoveryBusy || count === 0;
+      button.textContent = count ? `恢复所选（${count}）` : '恢复所选';
+    }
+    this.draftRecoveryListEl.querySelectorAll<HTMLInputElement | HTMLButtonElement>('input, button').forEach(control => {
+      control.disabled = this.recoveryBusy;
+    });
+    this.setRecoveryStatus(this.recoveryBusy ? '正在处理草稿…' : this.recoveryDrafts.length ? `共 ${this.recoveryDrafts.length} 篇，已选择 ${count} 篇` : '暂无可恢复草稿；正在打开的文档不会在此重复列出。');
+  }
+
+  private renderDraftRecoveryList(drafts: RecoveryDraft[]): void {
+    const previous = this.recoveryDrafts || [];
+    const selected = this.selectedDraftIds || new Set<string>();
+    this.recoveryDrafts = drafts;
+    this.selectedDraftIds = new Set(drafts.filter(draft => selected.has(draft.id) && previous.some(old => this.sameDraft(old, draft))).map(draft => draft.id));
     this.draftRecoveryListEl.innerHTML = '';
-    for (const d of drafts) {
+    for (const draft of drafts) {
       const li = document.createElement('li');
-      li.className = 'recent-item';
-      const name = d.filePath ? d.filePath.split('/').pop()! : '未命名草稿';
-      const time = new Date(d.timestamp).toLocaleString();
-      const heading = document.createElement('span');
+      li.className = 'draft-recovery-item';
+      li.dataset.draftId = draft.id;
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = this.selectedDraftIds.has(draft.id);
+      const name = draft.filePath?.split('/').pop() || '未命名草稿';
+      checkbox.setAttribute('aria-label', `选择草稿：${name}`);
+      checkbox.addEventListener('change', () => {
+        if (checkbox.checked) this.selectedDraftIds.add(draft.id);
+        else this.selectedDraftIds.delete(draft.id);
+        this.previewDraft(draft);
+        this.updateRecoverySelection();
+      });
+      const preview = document.createElement('button');
+      preview.className = 'draft-item-preview';
+      preview.type = 'button';
       const title = document.createElement('strong');
       title.textContent = name;
       const date = document.createElement('span');
-      date.textContent = ` (${time})`;
-      heading.appendChild(title);
-      heading.appendChild(date);
+      date.textContent = new Date(draft.timestamp).toLocaleString();
       const path = document.createElement('span');
-      path.className = 'recent-item-path';
-      path.textContent = d.filePath || '未关联文件';
-      li.appendChild(heading);
-      li.appendChild(path);
+      path.className = 'draft-item-path';
+      path.textContent = draft.filePath || '未关联文件';
+      preview.append(title, date, path);
+      preview.addEventListener('click', () => this.previewDraft(draft));
+      const actions = document.createElement('div');
+      actions.className = 'draft-item-actions';
+      const discard = document.createElement('button');
+      discard.className = 'btn-secondary btn-sm draft-item-discard';
+      discard.type = 'button';
+      discard.textContent = '丢弃';
+      discard.setAttribute('aria-label', `丢弃草稿：${name}`);
+      const cancel = document.createElement('button');
+      cancel.className = 'btn-secondary btn-sm';
+      cancel.type = 'button';
+      cancel.textContent = '取消';
+      cancel.hidden = true;
+      cancel.addEventListener('click', () => { discard.textContent = '丢弃'; cancel.hidden = true; this.updateRecoverySelection(); });
+      discard.addEventListener('click', () => {
+        if (cancel.hidden) {
+          cancel.hidden = false;
+          discard.textContent = '确认丢弃';
+          this.previewDraft(draft);
+          this.setRecoveryStatus(`确认丢弃“${name}”？无法撤销，原文件不受影响。`);
+        } else void this.discardRecoveryDraft(draft);
+      });
+      actions.append(discard, cancel);
+      li.append(checkbox, preview, actions);
       this.draftRecoveryListEl.appendChild(li);
+    }
+    this.previewDraft(drafts.find(draft => draft.id === this.previewDraftId) || drafts[0]);
+    this.updateRecoverySelection();
+  }
+
+  private async discardRecoveryDraft(draft: RecoveryDraft): Promise<void> {
+    if (this.recoveryBusy) return;
+    this.recoveryBusy = true;
+    this.updateRecoverySelection();
+    let message = '';
+    try {
+      if (this.isDraftOpen(draft.id)) throw new Error('该草稿已在标签页打开，未删除');
+      const result = await window.electronAPI.deleteDraft(draft.id, draft);
+      if (!result.success) throw new Error(result.error || (result.conflict ? '草稿已更新，请重新预览后再操作' : '删除失败，请重试'));
+      message = '已丢弃该草稿，原文件未修改。';
+    } catch (error) { message = String(error); }
+    finally {
+      this.recoveryBusy = false;
+      await this.checkCrashRecoveryDrafts(false, false);
+      this.updateRecoverySelection();
+      this.setRecoveryStatus(message);
+    }
+  }
+
+  private async recoverSelectedDrafts(): Promise<void> {
+    if (this.recoveryBusy || !this.selectedDraftIds?.size) return;
+    const selected = this.recoveryDrafts.filter(draft => this.selectedDraftIds.has(draft.id));
+    this.recoveryBusy = true;
+    this.updateRecoverySelection();
+    let recovered = 0;
+    let message = '';
+    try {
+      recovered = await this.recoverDrafts(selected);
+      message = `已恢复 ${recovered} 篇。` + (recovered < selected.length ? '部分草稿已更新、移除或打开，请重新预览后选择。' : '');
+    } catch (error) { message = `恢复失败，草稿仍保留：${String(error)}`; }
+    finally {
+      this.recoveryBusy = false;
+      this.selectedDraftIds.clear();
+      await this.checkCrashRecoveryDrafts(false, false);
+      this.updateRecoverySelection();
+      this.setRecoveryStatus(message);
+      if (recovered === selected.length && !this.recoveryDrafts.length) this.draftRecoveryDialogEl.close();
     }
   }
 
   private async recoverAllDrafts(): Promise<void> {
     const res = await window.electronAPI?.getAllDrafts();
-    if (!res || !res.drafts) return;
-    for (const d of res.drafts) {
-      if (this.tabs.some(tab => tab.recoveredDraftId === d.id || tab.draftId === d.id)) continue;
+    if (res?.drafts) await this.recoverDrafts(res.drafts);
+  }
+
+  private async recoverDrafts(drafts: RecoveryDraft[]): Promise<number> {
+    let recovered = 0;
+    for (const draft of drafts) {
+      if (this.isDraftOpen(draft.id)) continue;
       // Old drafts have no trustworthy disk baseline. Keep them as detached copies.
-      const filePath = typeof d.savedContent === 'string' ? d.filePath || null : null;
-      const existing = filePath ? this.tabs.find(tab => tab.filePath === filePath) : undefined;
+      const filePath = typeof draft.savedContent === 'string' ? draft.filePath || null : null;
       let disk: Awaited<ReturnType<BridgeAPI['readFile']>> | undefined;
-      if (filePath && !existing) {
+      if (filePath && !this.tabs.some(tab => tab.filePath === filePath)) {
         try { disk = await window.electronAPI.readFile(filePath); }
         catch { disk = { success: false }; }
       }
-      if (this.tabs.some(tab => tab.recoveredDraftId === d.id || tab.draftId === d.id)) continue;
+      const latest = await window.electronAPI.getAllDrafts();
+      if (this.isDraftOpen(draft.id) || !latest.drafts.some(current => this.sameDraft(current, draft))) continue;
+      const existing = filePath ? this.tabs.find(tab => tab.filePath === filePath) : undefined;
       const tab = this.createTab({
         filePath: existing ? null : filePath,
-        recoveredDraftId: d.id,
-        title: d.filePath ? d.filePath.split('/').pop()! : '已恢复草稿',
-        rawContent: d.content,
-        savedContent: d.savedContent ?? '',
-        hasBOM: d.hasBOM,
-        lineEnding: d.lineEnding,
-        revision: d.revision,
+        recoveredDraftId: draft.id,
+        recoveredDraft: { ...draft },
+        title: draft.filePath ? draft.filePath.split('/').pop()! : '已恢复草稿',
+        rawContent: draft.content,
+        savedContent: draft.savedContent ?? '',
+        hasBOM: draft.hasBOM,
+        lineEnding: draft.lineEnding,
+        revision: draft.revision,
         isReadOnly: disk?.stats?.isReadOnly,
-        externalConflict: !!filePath && !existing && (!disk?.success || disk.content !== d.savedContent),
+        externalConflict: !!filePath && !existing && (!disk?.success || disk.content !== draft.savedContent),
         isEdited: true,
         isEditMode: true
       });
       this.switchTab(tab.id);
       this.scheduleDraftSave(tab);
-      if (d.filePath && !tab.filePath) this.showError('该草稿缺少原始版本记录或同名文件已打开，已恢复为独立副本；请使用“另存为”保存。');
+      recovered++;
+      if (draft.filePath && !tab.filePath) this.showError('该草稿缺少原始版本记录或同名文件已打开，已恢复为独立副本；请使用“另存为”保存。');
     }
+    return recovered;
   }
 
   // --- Scroll Position Memory ---
@@ -1653,10 +1909,14 @@ export class MoReadApp {
     }, 1000);
   }
 
-  private pauseAutoSave(message: string): void {
-    this.autoSavePaused = true;
-    this.cancelAutoSave();
-    this.showError(message);
+  private pauseAutoSave(message: string, tab?: DocumentTab): void {
+    if (tab) tab.autoSavePaused = true;
+    if (!tab || this.activeTab === tab) {
+      this.autoSavePaused = true;
+      this.cancelAutoSave();
+      this.showError(message);
+    }
+    this.updateSaveStatus();
   }
 
   // --- Search ---
@@ -1753,6 +2013,45 @@ export class MoReadApp {
 
   // --- Edit Marking ---
 
+  private setSaveState(state: 'saving' | 'failed' | undefined, tab?: DocumentTab): void {
+    if (tab) tab.saveState = state;
+    else this.fallbackSaveState = state;
+    this.updateSaveStatus();
+  }
+
+  public updateSaveStatus(): void {
+    const tab = this.activeTab;
+    const hasDocument = !!tab || (!this.tabs && !!this.currentFilePath);
+    const state = tab ? tab.saveState : this.fallbackSaveState;
+    const automatic = this.currentSettings?.saveMode === 'auto';
+    if (this.statusSavePolicyEl) {
+      this.statusSavePolicyEl.textContent = automatic ? (this.autoSavePaused ? '自动保存已暂停' : '自动保存') : '手动保存';
+      this.statusSavePolicyEl.title = automatic && tab && !tab.filePath
+        ? '新文档需先另存为，之后自动保存到该文件' : automatic ? '停止输入后自动保存到原文件' : '按 Cmd+S 保存到原文件';
+    }
+    if (this.statusSaveBadgeEl) {
+      let text = '未打开文件';
+      let kind = '';
+      if (hasDocument) {
+        if (state === 'saving') { text = '正在保存…'; kind = 'saving'; }
+        else if (state === 'failed') { text = '保存失败'; kind = 'failed'; }
+        else if (tab?.externalConflict) { text = '外部版本有变化'; kind = 'unsaved'; }
+        else if (this.isEdited || (tab && !tab.filePath)) { text = '未保存'; kind = 'unsaved'; }
+        else { text = '已保存'; kind = 'saved'; }
+      }
+      this.statusSaveBadgeEl.textContent = text;
+      this.statusSaveBadgeEl.className = `status-save-badge ${kind}`.trim();
+      this.statusSaveBadgeEl.style.display = 'inline';
+    }
+    if (this.statusDraftBackupEl) {
+      this.statusDraftBackupEl.textContent = !tab?.isEdited ? '' : tab.draftBackupFailed
+        ? '恢复草稿备份失败' : tab.draftSavedRevision === tab.editRevision
+          ? '恢复草稿已备份' : '恢复草稿待备份';
+      this.statusDraftBackupEl.classList.toggle('failed', !!tab?.isEdited && !!tab.draftBackupFailed);
+      this.statusDraftBackupEl.title = '本地恢复草稿独立保存；不会替代原文件的保存';
+    }
+  }
+
   public markAsEdited(): void {
     if (this.activeTab) {
       this.activeTab.editRevision++;
@@ -1771,24 +2070,20 @@ export class MoReadApp {
     }
     this.renderTabBar();
 
-    if (this.savedBadgeTimeout) {
-      clearTimeout(this.savedBadgeTimeout);
-      this.savedBadgeTimeout = null;
-    }
-    if (this.statusSaveBadgeEl) {
-      this.statusSaveBadgeEl.textContent = '[未保存]';
-      this.statusSaveBadgeEl.className = 'status-save-badge unsaved';
-      this.statusSaveBadgeEl.style.display = 'inline';
-    }
+    this.updateSaveStatus();
   }
 
   public markAsSaved(targetTab?: DocumentTab): void {
     const tab = targetTab ?? this.activeTab;
     if (tab) {
       tab.isEdited = false;
+      tab.saveState = undefined;
+      tab.draftSavedRevision = undefined;
+      tab.draftBackupFailed = false;
       this.cancelDraftSave(tab);
     } else {
       this._isEdited = false;
+      this.fallbackSaveState = undefined;
     }
     this.updateDocumentEdited();
     this.renderTabBar();
@@ -1801,18 +2096,7 @@ export class MoReadApp {
     }
     this.renderTabBar();
 
-    if (this.statusSaveBadgeEl) {
-      this.statusSaveBadgeEl.textContent = '[已保存]';
-      this.statusSaveBadgeEl.className = 'status-save-badge saved';
-      this.statusSaveBadgeEl.style.display = 'inline';
-
-      if (this.savedBadgeTimeout) clearTimeout(this.savedBadgeTimeout);
-      this.savedBadgeTimeout = setTimeout(() => {
-        if (this.statusSaveBadgeEl) {
-          this.statusSaveBadgeEl.style.display = 'none';
-        }
-      }, 2500);
-    }
+    this.updateSaveStatus();
   }
 
   private handleEditorInput(_e: Event): void {
@@ -1981,10 +2265,12 @@ export class MoReadApp {
     } else {
       this.hideSidebar();
     }
+    this.updateSaveStatus();
   }
 
   private saveSetting(update: any): void {
     this.currentSettings = { ...this.currentSettings, ...update };
+    this.updateSaveStatus();
     window.electronAPI?.saveSettings(this.currentSettings).catch((error) => {
       console.error('Failed to save settings:', error);
     });

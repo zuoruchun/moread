@@ -244,6 +244,49 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
         a.renderDraftRecoveryList([{id:'hostile', filePath:hostileName, content:'# harmless', timestamp:Date.now()}]);
         await wait(150);
         check(a.draftRecoveryListEl.textContent.includes(hostileName) && !a.draftRecoveryListEl.querySelector('img') && !window.__draftFilenameExecuted, 'Draft filenames display as text without executing HTML');
+        const hostileDraft = {id:'hostile-preview', filePath:hostileName, content:'<img src=x onerror="window.__draftFilenameExecuted=true">\n# 草稿正文', timestamp:1};
+        const otherDraft = {id:'leave-this-draft', content:'# Keep this draft', timestamp:2};
+        drafts.set(hostileDraft.id, hostileDraft); drafts.set(otherDraft.id, otherDraft);
+        await a.checkCrashRecoveryDrafts(true);
+        check(a.draftRecoveryDialogEl.open && document.getElementById('btn-recover-drafts').disabled, 'Recovery opens with no destructive default selection');
+        check(document.getElementById('draft-recovery-preview').textContent.includes(hostileDraft.content) && !document.getElementById('draft-recovery-preview').querySelector('img'), 'Preview shows literal untrusted draft text');
+        document.getElementById('btn-later-drafts').click();
+        check(!a.draftRecoveryDialogEl.open && drafts.has(hostileDraft.id) && drafts.has(otherDraft.id), 'Later preserves every draft');
+        a.openSettings(); document.getElementById('btn-manage-drafts').click();
+        await wait(100);
+        check(a.draftRecoveryDialogEl.open && !a.settingsDialogEl.open, 'Settings reopens recovery after Later');
+        const row = [...a.draftRecoveryListEl.children].find(row => row.dataset.draftId === hostileDraft.id);
+        row.querySelector('input').click();
+        check(!document.getElementById('btn-recover-drafts').disabled && document.getElementById('btn-recover-drafts').textContent.includes('1'), 'Checkbox updates selected recovery count');
+        await a.recoverSelectedDrafts();
+        const recovered = a.tabs.find(tab => tab.recoveredDraftId === hostileDraft.id);
+        check(recovered && recovered.filePath === null && recovered.rawContent === hostileDraft.content && drafts.has(otherDraft.id), 'Only selected draft restored intact as detached legacy copy');
+        check(a.draftRecoveryDialogEl.open && a.draftRecoveryListEl.children.length === 1 && !window.__draftFilenameExecuted, 'Remaining draft stays available and preview caused no injection');
+        const discard = a.draftRecoveryListEl.querySelector('.draft-item-discard');
+        discard.click();
+        check(drafts.has(otherDraft.id) && discard.textContent === '确认丢弃', 'Discard requires explicit second action');
+        a.draftRecoveryListEl.querySelector('.draft-item-actions button:last-child').click();
+        check(drafts.has(otherDraft.id) && discard.textContent === '丢弃', 'Cancel discard preserves draft');
+        await a.discardRecoveryDraft(otherDraft);
+        check(!drafts.has(otherDraft.id) && a.draftRecoveryListEl.children.length === 0 && document.getElementById('btn-recover-drafts').disabled, 'Individual discard updates the empty state');
+        document.getElementById('btn-later-drafts').click();
+        await a.closeTab(recovered.id);
+
+        a.switchTab(a.tabs.find(tab => tab.filePath === paths[1]).id);
+        await a.setEditMode(true); a.setSourceMode(true);
+        a.sourceTextareaEl.value += '\n# saved state'; a.markAsEdited();
+        const write = api.writeFile; let releaseSave;
+        api.writeFile = (...args) => new Promise(resolve => { releaseSave = async () => resolve(await write(...args)); });
+        const savingTab = a.activeTab, pendingSave = a.saveTab(savingTab);
+        for (let i=0; i<50 && !releaseSave; i++) await wait(10);
+        check(a.statusSaveBadgeEl.textContent === '正在保存…' && a.statusSavePolicyEl.textContent === '手动保存', 'Save progress and policy are visible');
+        a.switchTab(a.tabs.find(tab => tab.filePath === paths[2]).id);
+        check(a.statusSaveBadgeEl.textContent === '已保存', 'Other tab does not inherit saving state');
+        await releaseSave(); await pendingSave; api.writeFile = write;
+        a.switchTab(savingTab.id);
+        await wait(2600);
+        check(a.statusSaveBadgeEl.textContent === '已保存' && getComputedStyle(a.statusSaveBadgeEl).display !== 'none', 'Saved status remains visible after old timeout');
+
 
         a.switchTab(a.tabs.find(tab => tab.filePath === paths[1]).id);
         if (!a.isEditMode) await a.toggleEditMode();
@@ -277,20 +320,40 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             let checks = 0;
             const check = (ok, message) => { if (!ok) throw new Error(message); checks++; window.webkit.messageHandlers.nativeAPI.postMessage({id:'checkpoint',action:'test:checkpoint',payload:{detail:message}}); };
             const click = id => document.getElementById(id).click();
+            const wait = ms => new Promise(r => setTimeout(r, ms));
+            const waitFor = async predicate => {
+              for (let i = 0; i < 80; i++) {
+                if (predicate()) return;
+                await wait(50);
+              }
+            };
             check(document.querySelectorAll('.header-left button').length === 1, 'One sidebar button');
-            check(document.querySelectorAll('.header-right button').length === 3 && !document.querySelector('.header-right select') && !document.getElementById('btn-settings') && !document.getElementById('btn-font-increase') && !document.querySelector('.status-left button'), 'Toolbar cleanup');
+            check(document.querySelectorAll('.header-right button').length === 5 && document.querySelectorAll('.toolbar-segmented').length === 2 && !document.querySelector('.header-right select') && !document.getElementById('btn-settings') && !document.getElementById('btn-font-increase') && !document.querySelector('.status-left button'), 'Toolbar cleanup');
             check(document.getElementById('btn-welcome-new-file'), 'Welcome has new file action');
+            check(['btn-mode-read','btn-toggle-edit','btn-view-rendered','btn-toggle-source','btn-search'].every(id => document.getElementById(id).disabled), 'Document controls disabled on welcome');
             click('btn-welcome-new-file');
             check(a.activeTab && !a.activeTab.filePath && a.isEditMode && a.markdownBodyEl.getAttribute('contenteditable') === 'true', 'Welcome new file is immediately editable');
             await a.closeTab(a.activeTab.id);
+            check(document.getElementById('btn-toggle-edit').disabled && a.statusSaveBadgeEl.textContent === '未打开文件', 'Closing last tab clears mode and save status');
             await a.loadFile(root + '/未命名.md');
             check(a.docTitleEl.textContent === '未命名.md' && a.filesContentEl.textContent.includes('未命名.md'), 'Standalone file list');
+            const pressed = id => document.getElementById(id).getAttribute('aria-pressed') === 'true';
+            click('btn-mode-read'); await waitFor(() => !a.isEditMode);
+            check(pressed('btn-mode-read') && pressed('btn-view-rendered') && a.sourceTextareaEl.readOnly, 'Read/body mode is explicit');
+            click('btn-toggle-source'); click('btn-toggle-source');
+            check(a.isSourceMode && !a.isEditMode && pressed('btn-toggle-source') && a.sourceTextareaEl.readOnly, 'Read/source selection is idempotent');
+            click('btn-toggle-edit'); click('btn-toggle-edit');
+            check(a.isEditMode && a.isSourceMode && pressed('btn-toggle-edit') && !a.sourceTextareaEl.readOnly, 'Edit/source selection is idempotent');
+            click('btn-view-rendered');
+            check(a.isEditMode && !a.isSourceMode && pressed('btn-view-rendered') && a.markdownBodyEl.contentEditable === 'true', 'Edit/body mode is explicit');
+            check([...document.querySelectorAll('.header-right button')].every(el => el.getBoundingClientRect().right <= innerWidth), 'Mode controls fit the narrow native window');
+
             click('btn-toggle-sidebar'); click('tab-files'); click('btn-toggle-sidebar'); click('btn-toggle-sidebar');
             check(a.filesTabBtn.classList.contains('active') && a.btnToggleSidebarEl.getAttribute('aria-expanded') === 'true', 'Tab survives collapse');
             click('tab-outline');
             check([...document.querySelectorAll('.outline-link')].map(x => x.textContent).join('|') === '1. 第一节|2. 第二节|3. 第三节', 'Visible numbered outline');
             check([...document.querySelectorAll('.outline-link')].every(x => document.getElementById(x.getAttribute('href').slice(1))), 'Heading anchors');
-            click('btn-toggle-source'); click('btn-toggle-source');
+            click('btn-toggle-source'); click('btn-view-rendered');
             check(!a.outlineContentEl.textContent.includes('\\\\'), 'Roundtrip outline escapes');
             const api = window.electronAPI, readFolder = api.readFolder;
             let release; api.readFolder = () => new Promise(resolve => { release = resolve; });
@@ -353,7 +416,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             check(saved.content.includes('```py\\n' + editedCode + '\\n```') && saved.content.includes('print("second block")') && !saved.content.includes('代码语言') && !a.isEdited, 'Saved file preserves language, code, trailing lines and neighboring blocks');
             click('btn-toggle-source');
             check(a.sourceTextareaEl.value.includes('```py\\n' + editedCode + '\\n```'), 'Code edits survive switching to source');
-            click('btn-toggle-source');
+            click('btn-view-rendered');
             code = a.markdownBodyEl.querySelector('.code-block-container pre code');
             language = a.markdownBodyEl.querySelector('input.code-lang');
             editor = a.markdownBodyEl.querySelector('textarea.code-editor');
@@ -375,9 +438,9 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             language.value = ''; language.dispatchEvent(new Event('input', {bubbles:true}));
             click('btn-toggle-source');
             check(a.sourceTextareaEl.value.includes('```\\n' + longLine), 'Clearing language produces an unlabelled fence');
-            click('btn-toggle-source');
+            click('btn-view-rendered');
             await a.loadFile(root + '/公式.md');
-            if (a.isSourceMode) click('btn-toggle-source');
+            if (a.isSourceMode) click('btn-view-rendered');
             if (!a.isEditMode) await a.toggleEditMode();
             const formula = a.markdownBodyEl.querySelector('.math-inline-wrapper');
             check(formula && formula.querySelector('svg'), 'Inline formula initially rendered');
@@ -404,7 +467,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             mathEditor.select(); document.execCommand('insertText', false, 'z=3');
             click('btn-toggle-source');
             check(a.isSourceMode && a.sourceTextareaEl.value.includes('z=3') && a.sourceTextareaEl.value.includes(newFormula), 'First source click preserves both formula edits');
-            click('btn-toggle-source');
+            click('btn-view-rendered');
             check(a.markdownBodyEl.querySelector('.math-block-wrapper').getAttribute('data-raw-formula') === 'z=3', 'Math roundtrip preserves block source');
             check(await a.saveCurrentFile(), 'Save both math edits');
             await a.toggleEditMode();
@@ -412,7 +475,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             a.markdownBodyEl.querySelector('.math-inline-wrapper').click();
             check(!a.markdownBodyEl.querySelector('textarea.math-editor'), 'Read mode cannot change a formula');
             await a.loadFile(root + '/查找替换.md');
-            if (a.isSourceMode) click('btn-toggle-source');
+            if (a.isSourceMode) click('btn-view-rendered');
             if (!a.isEditMode) await a.toggleEditMode();
             const search = document.getElementById('search-input'), replacement = document.getElementById('replace-input');
             const query = text => { search.value = text; search.dispatchEvent(new Event('input')); };
@@ -487,13 +550,6 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             a.searchController.close();
             await a.loadFile(root + '/自动保存.md');
             if (!a.isSourceMode) click('btn-toggle-source');
-            const wait = ms => new Promise(r => setTimeout(r, ms));
-            const waitFor = async predicate => {
-              for (let i = 0; i < 80; i++) {
-                if (predicate()) return;
-                await wait(50);
-              }
-            };
             const realWrite = api.writeFile;
             let writes = 0;
             api.writeFile = async (...args) => { writes++; return realWrite(...args); };
@@ -535,13 +591,13 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             api.writeFile = realWrite;
             a.switchTab(failedSaveTab.id);
             check(await a.saveCurrentFile() && !a.isEdited, 'Manual retry recovers after auto save failure');
-            click('btn-toggle-source');
+            click('btn-view-rendered');
             const autoHeading = a.markdownBodyEl.querySelector('h1');
             autoHeading.textContent = '渲染自动保存'; autoHeading.dispatchEvent(new InputEvent('input', {bubbles:true,data:'渲染自动保存'}));
             await waitFor(() => !a.isEdited);
             check(!a.isEdited && (await api.readFile(root + '/自动保存.md')).content === '# 渲染自动保存\\n', 'Rendered text auto save uses live DOM');
             click('btn-toggle-source');
-            typeSource('# 代码自动保存\\n\\n```python\\nprint(1)\\n```\\n'); click('btn-toggle-source');
+            typeSource('# 代码自动保存\\n\\n```python\\nprint(1)\\n```\\n'); click('btn-view-rendered');
             const autoCode = a.markdownBodyEl.querySelector('textarea.code-editor');
             autoCode.value = 'print("自动保存")'; autoCode.dispatchEvent(new InputEvent('input', {bubbles:true,data:'自动保存'}));
             await waitFor(() => !a.isEdited);

@@ -335,6 +335,15 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
         }
         do {
             let url = draftURL(for: draftID)
+            if let expected = payload["expectedDraft"] as? [String: Any] {
+                // Draft handlers run serially on the main thread, including saves from other windows.
+                let current = readDraft(at: url) ?? readDraft(at: legacyDraftURL(for: draftID))
+                guard let current = current, current["id"] as? String == draftID,
+                      NSDictionary(dictionary: current).isEqual(to: expected) else {
+                    sendResponse(id: id, result: ["success": false, "conflict": true, "error": "草稿已更新或移除，请重新预览后再操作"])
+                    return
+                }
+            }
             if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
             try removeLegacyDraft(for: draftID)
             sendResponse(id: id, result: ["success": true])

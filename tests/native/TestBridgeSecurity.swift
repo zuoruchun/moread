@@ -145,6 +145,16 @@ final class BridgeSecurityTests: NSObject, NSApplicationDelegate, WKScriptMessag
         await api('drafts:save', {id: 'legacy:/document', content: 'migrated'});
         const migrated = (await api('drafts:get-all')).drafts.filter(d => d.id === 'legacy:/document');
         check(migrated.length === 1 && migrated[0].content === 'migrated', 'Legacy migration duplicated draft');
+        const previewed = {id:'conditional', content:'old preview', timestamp:1, savedContent:'baseline'};
+        await api('drafts:save', previewed);
+        await api('drafts:save', {...previewed, content:'newer content', timestamp:2});
+        const refused = await api('drafts:delete', {id:previewed.id, expectedDraft:previewed});
+        check(!refused.success && refused.conflict, 'Stale preview deleted a newly updated draft');
+        const current = (await api('drafts:get-all')).drafts.find(d => d.id === previewed.id);
+        check(current.content === 'newer content', 'Conditional deletion altered current draft');
+        check((await api('drafts:delete', {id:current.id, expectedDraft:current})).success, 'Matching preview could not delete its draft');
+        check(!(await api('drafts:get-all')).drafts.some(d => d.id === current.id), 'Conditional deletion did not remove matching draft');
+        check(!(await api('drafts:delete', {id:current.id, expectedDraft:current})).success, 'Deleted snapshot falsely appeared current');
         await api('test:restart');
         const outstanding = Array.from({length: 20}, () => api('fs:read-file', {filePath: root + '/allowed/doc.md'}));
         await api('fs:unwatch-file', {filePath: root + '/allowed/doc.md'});

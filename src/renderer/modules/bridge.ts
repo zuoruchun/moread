@@ -20,7 +20,7 @@ export interface BridgeAPI {
   exportPDF: () => Promise<{ success: boolean; error?: string }>;
   saveDraft: (draft: RecoveryDraft) => Promise<{ success: boolean }>;
   getAllDrafts: () => Promise<{ drafts: RecoveryDraft[] }>;
-  deleteDraft: (id: string) => Promise<{ success: boolean }>;
+  deleteDraft: (id: string, expectedDraft?: RecoveryDraft) => Promise<{ success: boolean; conflict?: boolean; error?: string }>;
   clearDrafts: () => Promise<{ success: boolean }>;
   checkConflict: (filePath: string, baselineRevision: string) => Promise<{ conflict: boolean; currentRevision?: string; reason?: string }>;
   readFile: (filePath: string) => Promise<{ success: boolean; content?: string; error?: string; stats?: { size: number; mtime: number; revision?: string; hasBOM?: boolean; lineEnding?: '\n' | '\r\n'; isReadOnly?: boolean } }>;
@@ -154,7 +154,7 @@ export function initNativeBridge(): BridgeAPI {
       exportPDF: () => callNative('export:pdf', undefined, 0),
       saveDraft: (draft) => callNative('drafts:save', draft),
       getAllDrafts: () => callNative('drafts:get-all'),
-      deleteDraft: (id) => callNative('drafts:delete', { id }),
+      deleteDraft: (id, expectedDraft) => callNative('drafts:delete', { id, expectedDraft }),
       clearDrafts: () => callNative('drafts:clear-all'),
       checkConflict: (filePath, baselineRevision) => callNative('fs:check-conflict', { filePath, baselineRevision }),
       readFile: (filePath: string) => callNative('fs:read-file', { filePath }),
