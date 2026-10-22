@@ -193,6 +193,128 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
         }
     }
 
+    let pasteRegressionScript = #"""
+    async (a, api, root, check) => {
+      const file = root + '/正文粘贴.md';
+      const baseline = '# 原文标题\n\n前缀 TARGET 后缀\n\n尾部保留。\n';
+      const originalConfirm = api.confirmSaveDialog;
+      const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+      const select = (node, start, end = start) => {
+        const range = document.createRange(); range.setStart(node, start); range.setEnd(node, end);
+        const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+      };
+      const paste = (target, text, html) => {
+        target.focus();
+        const data = new DataTransfer();
+        if (text !== null) data.setData('text/plain', text);
+        if (html) data.setData('text/html', html);
+        const event = new ClipboardEvent('paste', {bubbles:true,cancelable:true,clipboardData:data});
+        target.dispatchEvent(event);
+        // Synthetic clipboard events have no default editing action. Emulate the old plaintext path.
+        if (!event.defaultPrevented && target === a.markdownBodyEl && a.isEditMode) document.execCommand('insertText', false, text || '');
+        return event;
+      };
+      const reset = text => {
+        a.setSourceMode(true); a.sourceTextareaEl.value = text; a.markAsEdited(); a.setSourceMode(false);
+      };
+      const append = () => { a.markdownBodyEl.focus(); const range = document.createRange(); range.selectNodeContents(a.markdownBodyEl); range.collapse(false); const selection=getSelection(); selection.removeAllRanges(); selection.addRange(range); };
+      try {
+        api.confirmSaveDialog = async () => ({action:'dont-save'});
+        a.selectSaveModeEl.value = 'manual'; a.selectSaveModeEl.dispatchEvent(new Event('change'));
+        await api.writeFile(file, baseline); await a.loadFile(file); await a.setEditMode(true); a.setSourceMode(false);
+        const paragraph = a.markdownBodyEl.querySelector('p').firstChild;
+        select(paragraph, 3, 9);
+        const before = a.getTabContent(a.activeTab);
+        const markdown = '**公式编号与 Label 规范**\n\n- ✅ **默认不滥用编号**：使用 `equation*` / `align*`。\n- ✅ **精准加标**：保留 `\\label{eq:one}`。\n\n行内 $x+1$。\n\n$$\nx^2+y^2=1\n$$\n\n```python\nprint("中文")\n    # indent\n```\n';
+        const event = paste(a.markdownBodyEl, markdown, '<pre><code>clipboard editor formatting</code></pre>');
+        check(event.defaultPrevented && a.markdownBodyEl.querySelector('strong')?.textContent === '公式编号与 Label 规范', 'Rendered paste must interpret Markdown immediately instead of leaving literal asterisks: ' + a.markdownBodyEl.innerHTML.slice(0,700));
+        check(a.markdownBodyEl.querySelectorAll('li').length === 2 && a.markdownBodyEl.querySelectorAll('li strong').length === 2, 'Pasted lists and nested emphasis render immediately');
+        check(a.markdownBodyEl.querySelector('p').textContent.includes('前缀') && a.markdownBodyEl.textContent.includes('后缀') && a.markdownBodyEl.textContent.includes('尾部保留。') && !a.markdownBodyEl.textContent.includes('TARGET'), 'Paste replaces only the selection and preserves neighboring text');
+        check(a.markdownBodyEl.querySelector('.math-inline-wrapper svg') && a.markdownBodyEl.querySelector('.math-block-wrapper svg'), 'Pasted inline and display formulas render');
+        check(a.markdownBodyEl.querySelector('.math-inline-wrapper').getAttribute('role') === 'button', 'New formula remains editable');
+        check(a.markdownBodyEl.querySelector('textarea.code-editor')?.value === 'print("中文")\n    # indent' && a.markdownBodyEl.querySelector('input.code-lang').value === 'python', 'Pasted fence preserves code, indentation and language');
+        check(a.isEdited && a.statusSaveBadgeEl.textContent === '未保存', 'Rendered paste marks its document dirty');
+        const inserted = a.getTabContent(a.activeTab);
+        check(inserted.includes('**公式编号与 Label 规范**') && inserted.includes('`\\label{eq:one}`') && inserted.includes('$$\nx^2+y^2=1\n$$'), 'Pasted Markdown serializes without escaping formatting or formula sources');
+        document.execCommand('undo');
+        check(a.getTabContent(a.activeTab) === before, 'One native undo restores the pre-paste selection and document: ' + JSON.stringify({before,after:a.getTabContent(a.activeTab),html:a.markdownBodyEl.innerHTML}));
+        await wait(0); document.execCommand('redo'); await wait(0);
+        check(a.getTabContent(a.activeTab) === inserted, 'Native redo restores formatted paste and code values');
+        check([...a.markdownBodyEl.querySelectorAll('[data-paste-protected]')].every(node => node.contentEditable === 'false'), 'Formula and code protection is restored after native redo');
+        check(await a.saveCurrentFile(), 'Rendered paste saves successfully');
+        const disk = await api.readFile(file);
+        check(disk.content === inserted && !disk.content.includes('clipboard editor formatting'), 'Real disk save matches rendered Markdown rather than clipboard HTML');
+        a.setSourceMode(true);
+        check(a.sourceTextareaEl.value === inserted, 'Switching to source preserves pasted Markdown');
+        a.setSourceMode(false);
+        check(a.markdownBodyEl.querySelectorAll('li').length === 2 && a.markdownBodyEl.querySelector('.math-block-wrapper svg'), 'Pasted content survives source/body roundtrip');
+
+        reset('左 TARGET 右\n');
+        select(a.markdownBodyEl.querySelector('p').firstChild, 2, 8);
+        paste(a.markdownBodyEl, '**加粗** 与 `行内代码`');
+        check(a.markdownBodyEl.querySelectorAll('p').length === 1 && a.markdownBodyEl.querySelector('p').textContent.replace(/\u00a0/g, ' ') === '左 加粗 与 行内代码 右', 'Inline Markdown stays in the surrounding paragraph: ' + JSON.stringify({html:a.markdownBodyEl.innerHTML,markdown:a.getTabContent(a.activeTab)}));
+        check(a.markdownBodyEl.querySelector('strong') && a.markdownBodyEl.querySelector('code'), 'Inline formatting is immediately visible');
+        reset('含有 `TARGET` 的代码。\n');
+        select(a.markdownBodyEl.querySelector('code').firstChild, 0, 6);
+        paste(a.markdownBodyEl, '**literal**');
+        check(a.markdownBodyEl.querySelector('code').textContent === '**literal**' && !a.markdownBodyEl.querySelector('code strong'), 'Pasting into inline code keeps literal Markdown');
+
+        reset('# 重复标题\n\n末尾\n'); append();
+        paste(a.markdownBodyEl, '\n# 重复标题\n\n## 子节\n');
+        const headings = [...a.markdownBodyEl.querySelectorAll('h1,h2')];
+        check(headings.length === 3 && new Set(headings.map(h => h.id)).size === 3, 'Pasted duplicate headings get distinct anchors');
+        check([...a.outlineContentEl.querySelectorAll('a')].length === 3 && [...a.outlineContentEl.querySelectorAll('a')].every(link => headings.some(h => '#'+h.id === link.getAttribute('href'))), 'Outline immediately includes pasted headings with working anchors');
+        document.execCommand('undo');
+        check(a.outlineContentEl.querySelectorAll('a').length === 1, 'Undo removes pasted headings from the outline');
+
+        reset('保留文档。\n'); append();
+        window.__pasteInjected = false;
+        paste(a.markdownBodyEl, '\n**安全文本**\n\n<img src="https://example.invalid/paste.png" onerror="window.__pasteInjected=true"><script>window.__pasteInjected=true</script>');
+        await wait(50);
+        check(!window.__pasteInjected && !a.markdownBodyEl.querySelector('script, [onerror]'), 'Paste sanitizes executable Markdown HTML');
+        check(!a.markdownBodyEl.querySelector('img[src^="https://"]') && a.markdownBodyEl.querySelector('.remote-image-blocked'), 'Paste respects blocked network image settings');
+        reset('富文本 TARGET 尾部\n');
+        select(a.markdownBodyEl.querySelector('p').firstChild, 4, 10);
+        paste(a.markdownBodyEl, null, '<strong>加粗网页文字</strong>');
+        check(a.markdownBodyEl.querySelector('strong')?.textContent === '加粗网页文字' && a.markdownBodyEl.textContent.includes('尾部'), 'HTML-only clipboard has a sanitized Markdown fallback');
+
+        reset('开头保留。\n'); append();
+        paste(a.markdownBodyEl, '\r\n> 引用 **粗体**\r\n\r\n| 参数 | 数值 |\r\n| --- | --- |\r\n| alpha | 1 |\r\n\r\n- [ ] 未完成\r\n- [x] 已完成\r\n');
+        check(a.markdownBodyEl.querySelector('blockquote strong')?.textContent === '粗体' && a.markdownBodyEl.querySelectorAll('table tr').length === 2, 'CRLF clipboard renders quotes and GFM tables: ' + JSON.stringify({html:a.markdownBodyEl.innerHTML,markdown:a.getTabContent(a.activeTab)}));
+        check(a.markdownBodyEl.querySelectorAll('.task-list-item-checkbox').length === 2 && a.markdownBodyEl.querySelector('.task-list-item-checkbox[checked]'), 'Pasted task list preserves completion states');
+        reset('结尾粘贴\n'); append();
+        paste(a.markdownBodyEl, '\n```text\nliteral **code**\n```\n');
+        const codeAfterPaste = a.markdownBodyEl.querySelector('textarea.code-editor');
+        check(codeAfterPaste.value === 'literal **code**', 'Fence paste at document end keeps Markdown literal');
+        const codeClipboard = new DataTransfer(); codeClipboard.setData('text/plain', '\n**still code**');
+        codeAfterPaste.focus(); codeAfterPaste.setSelectionRange(codeAfterPaste.value.length, codeAfterPaste.value.length);
+        codeAfterPaste.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:codeClipboard}));
+        check(codeAfterPaste.value === 'literal **code**\n**still code**' && !a.markdownBodyEl.querySelector('.code-block-container strong'), 'Nested code editor keeps its existing plaintext paste behavior');
+
+        reset('空文本剪贴板\n'); append();
+        paste(a.markdownBodyEl, '', '<strong>HTML 内容</strong><img src="https://example.invalid/clipboard.png" onerror="window.__pasteInjected=true">');
+        check(a.markdownBodyEl.querySelector('strong')?.textContent === 'HTML 内容', 'Empty plaintext clipboard uses its HTML content instead of dropping it');
+        check(!a.markdownBodyEl.querySelector('img[src^="https://"], [onerror]') && a.markdownBodyEl.querySelector('.remote-image-blocked') && !window.__pasteInjected, 'HTML fallback keeps image privacy and script sanitization');
+
+        reset('只读文档\n'); await a.saveCurrentFile(); await a.setEditMode(false);
+        append(); const unchanged = a.markdownBodyEl.innerHTML;
+        const readEvent = paste(a.markdownBodyEl, '**must not insert**');
+        check(!readEvent.defaultPrevented && a.markdownBodyEl.innerHTML === unchanged && !a.isEdited, 'Read mode rejects rendered paste edits');
+        await a.setEditMode(true); a.setSourceMode(true);
+        const sourceEvent = paste(a.sourceTextareaEl, '**source stays literal**');
+        check(!sourceEvent.defaultPrevented, 'Source textarea retains native plain text paste');
+        a.setSourceMode(false); append();
+        a.markdownBodyEl.dispatchEvent(new CompositionEvent('compositionstart', {bubbles:true,data:'中'}));
+        const composingData = new DataTransfer(); composingData.setData('text/plain','**输入中**');
+        const composing = new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:composingData});
+        a.markdownBodyEl.dispatchEvent(composing);
+        check(!composing.defaultPrevented, 'Rendered Markdown conversion does not interrupt an unfinished IME composition');
+        a.markdownBodyEl.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:'中文'}));
+        await a.closeTab(a.activeTab.id);
+      } finally { api.confirmSaveDialog = originalConfirm; }
+    }
+    """#
+
     let bugRegressionScript = #"""
     async (a, api, root, check) => {
       const originalConfirm = api.confirmSaveDialog;
@@ -347,6 +469,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             click('btn-view-rendered');
             check(a.isEditMode && !a.isSourceMode && pressed('btn-view-rendered') && a.markdownBodyEl.contentEditable === 'true', 'Edit/body mode is explicit');
             check([...document.querySelectorAll('.header-right button')].every(el => el.getBoundingClientRect().right <= innerWidth), 'Mode controls fit the narrow native window');
+            await (\(pasteRegressionScript))(a, window.electronAPI, root, check);
 
             click('btn-toggle-sidebar'); click('tab-files'); click('btn-toggle-sidebar'); click('btn-toggle-sidebar');
             check(a.filesTabBtn.classList.contains('active') && a.btnToggleSidebarEl.getAttribute('aria-expanded') === 'true', 'Tab survives collapse');

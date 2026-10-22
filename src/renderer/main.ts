@@ -3,6 +3,7 @@ import { htmlToMarkdown } from './modules/editor.ts';
 import { createPDFSnapshot, type PDFSnapshot } from './modules/pdfExport.ts';
 import { bindCodeBlockEditing, readCodeBlock } from './modules/codeBlocks.ts';
 import { bindMathEditing, setMathEditingEnabled } from './modules/mathEditing.ts';
+import { bindMarkdownPaste } from './modules/paste.ts';
 import { OutlineController } from './modules/outline.ts';
 import { SearchController } from './modules/search.ts';
 import { FileTreeController } from './modules/fileTree.ts';
@@ -554,6 +555,19 @@ export class MoReadApp {
     bindCodeBlockEditing(this.markdownBodyEl);
     bindMathEditing(this.markdownBodyEl, () => this.isEditMode && !this.isSourceMode);
     this.markdownBodyEl.addEventListener('input', (e) => this.handleEditorInput(e));
+    bindMarkdownPaste(this.markdownBodyEl, {
+      canEdit: () => this.isEditMode && !this.isSourceMode && !this.isComposing,
+      parseOptions: () => ({
+        currentFilePath: this.currentFilePath || undefined,
+        allowRemoteImages: this.currentSettings.allowRemoteImages === true,
+        readonly: false
+      }),
+      onInserted: inputDispatched => {
+        if (!inputDispatched) this.markAsEdited();
+        this.refreshPastedDocument();
+      },
+      onError: error => this.showError(`粘贴处理失败：${error instanceof Error ? error.message : '请重试'}`)
+    });
     this.markdownBodyEl.addEventListener('click', (e) => this.handleContentClick(e));
 
     // Input protection in read-only mode
@@ -2099,11 +2113,26 @@ export class MoReadApp {
     this.updateSaveStatus();
   }
 
-  private handleEditorInput(_e: Event): void {
+  private refreshPastedDocument(): void {
+    const tab = this.activeTab;
+    if (!tab || !tab.isEditMode || tab.isSourceMode) return;
+    tab.rawContent = this.getTabContent(tab);
+    setMathEditingEnabled(this.markdownBodyEl, true);
+    this.outlineController.update(Array.from(this.markdownBodyEl.querySelectorAll<HTMLElement>('h1, h2, h3, h4, h5, h6'), heading => ({
+      id: heading.id,
+      level: Number(heading.tagName.slice(1)),
+      text: heading.textContent || ''
+    })));
+    this.searchController.refresh();
+    this.updateStatsFromText(this.markdownBodyEl.innerText || '');
+  }
+
+  private handleEditorInput(e: Event): void {
     if (!this.isEditMode) return;
     this.markAsEdited();
     const text = this.markdownBodyEl.innerText || '';
     this.updateStatsFromText(text);
+    if (e.target === this.markdownBodyEl && ['historyUndo', 'historyRedo'].includes((e as InputEvent).inputType)) this.refreshPastedDocument();
   }
 
   private updateStatsFromText(text: string): void {
