@@ -19,6 +19,20 @@ final class WindowCloseTests {
         print("PASS: \(message)")
     }
 
+    func clickSheetButton(_ title: String, window: NSWindow) -> Timer {
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self, weak window] timer in
+            MainActor.assumeIsolated {
+                guard let self, let content = window?.attachedSheet?.contentView,
+                      let button = self.findButton(title, in: content) else { return }
+                button.performClick(nil)
+                timer.invalidate()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .modalPanel)
+        return timer
+    }
+
     func javascript(_ controller: MainWindowController, _ script: String) async throws -> Any? {
         try await withCheckedThrowingContinuation { continuation in
             controller.webView.callAsyncJavaScript(script, arguments: [:], in: nil, in: .page) {
@@ -71,11 +85,40 @@ final class WindowCloseTests {
         let quitState = try await javascript(controller, "return window.moreadApp.isEdited;") as? Bool
         check(nativeCancelClicked && quitState == true && delegate.windowControllers.count == 1, "Actual NSApplication termination shows a native save sheet and cancellation retains edits")
 
-        _ = try await javascript(controller, "window.electronAPI.confirmSaveDialog = async () => ({action:'save'}); window.electronAPI.saveAsDialog = async () => ({canceled:false,success:false,error:'Synthetic write failure'});")
+        _ = try await javascript(controller, "window.__originalSaveAs = window.electronAPI.saveAsDialog; window.electronAPI.confirmSaveDialog = async () => ({action:'save'}); window.electronAPI.saveAsDialog = async () => ({canceled:false,success:false,error:'Synthetic write failure'});")
         DispatchQueue.main.async { NSApp.terminate(nil) }
         try await Task.sleep(nanoseconds: 450_000_000)
         let failureState = try await javascript(controller, "return window.moreadApp.isEdited && window.moreadApp.errorBannerEl.textContent.includes('Synthetic write failure');") as? Bool
         check(failureState == true && delegate.windowControllers.count == 1, "Failed Save As aborts actual application termination")
+
+        let documents = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("Documents/Moread")
+        _ = try await javascript(controller, "window.electronAPI.saveAsDialog = window.__originalSaveAs; window.electronAPI.confirmSaveDialog = window.__originalConfirmSave;")
+        let saveCancelTimer = clickSheetButton("取消", window: window)
+        let saveCanceled = try await javascript(controller, "return await window.moreadApp.saveCurrentFile();") as? Bool
+        saveCancelTimer.invalidate()
+        check(saveCanceled == false && !FileManager.default.fileExists(atPath: documents.path), "Canceling the new save choices preserves the untitled document without creating files")
+        let chooseTimer = clickSheetButton("选择位置…", window: window)
+        _ = try await javascript(controller, "window.__chooseResult = window.moreadApp.saveCurrentFile();")
+        for _ in 0..<40 {
+            if window.attachedSheet is NSSavePanel { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        chooseTimer.invalidate()
+        check(window.attachedSheet is NSSavePanel, "Choose Location still opens the original native save panel")
+        (window.attachedSheet as? NSSavePanel)?.cancel(nil)
+        let chooseCanceled = try await javascript(controller, "return await window.__chooseResult;") as? Bool
+        check(chooseCanceled == false, "Canceling the location panel retains the untitled edits")
+        let documentsTimer = clickSheetButton("保存到文稿", window: window)
+        _ = try await javascript(controller, "document.dispatchEvent(new KeyboardEvent('keydown', {key:'s', ctrlKey:true, bubbles:true}));")
+        for _ in 0..<60 {
+            if (try? await javascript(controller, "return Boolean(window.moreadApp.activeTab.filePath) && !window.moreadApp.isEdited;")) as? Bool == true { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        documentsTimer.invalidate()
+        let firstURL = documents.appendingPathComponent("未命名.md")
+        check((try? String(contentsOf: firstURL, encoding: .utf8)) == "# unsaved window content", "Ctrl+S save choice creates Documents/Moread and saves real bytes")
+        _ = try await javascript(controller, "window.moreadApp.sourceTextareaEl.value = '# updated Documents file'; window.moreadApp.markAsEdited(); await window.moreadApp.saveCurrentFile();")
+        check((try? String(contentsOf: firstURL, encoding: .utf8)) == "# updated Documents file" && !FileManager.default.fileExists(atPath: documents.appendingPathComponent("未命名 (2).md").path), "Subsequent Save updates the same Documents file")
 
         let savedURL = URL(fileURLWithPath: CommandLine.arguments[1]).appendingPathComponent("quit-save.md")
         try "# baseline".write(to: savedURL, atomically: true, encoding: .utf8)
@@ -87,12 +130,19 @@ final class WindowCloseTests {
             if (!a.isEditMode) await a.toggleEditMode();
             if (!a.isSourceMode) a.toggleSourceView();
             a.sourceTextareaEl.value = '# saved by application quit'; a.markAsEdited();
-            window.electronAPI.confirmSaveDialog = async title => ({action:title === 'quit-save.md' ? 'save' : 'dont-save'});
+            a.openNewEmptyTab();
+            if (!a.isSourceMode) a.toggleSourceView();
+            a.sourceTextareaEl.value = '# new document saved on quit'; a.markAsEdited();
+            window.electronAPI.confirmSaveDialog = async (title, untitled) => untitled ? window.__originalConfirmSave(title, untitled) : ({action:'save'});
             """)
-        let finalChecks = passed + 2
+        _ = clickSheetButton("保存到文稿", window: window)
+        let finalChecks = passed + 3
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
             guard (try? String(contentsOf: savedURL, encoding: .utf8)) == "# saved by application quit" else {
                 print("FAIL: application quit did not persist the document"); exit(1)
+            }
+            guard (try? String(contentsOf: documents.appendingPathComponent("未命名 (2).md"), encoding: .utf8)) == "# new document saved on quit" else {
+                print("FAIL: native quit sheet did not save an untitled document to Documents"); exit(1)
             }
             print("PASS: \(finalChecks) production-window/NSApplication close checks (native cancel sheet and real disk save; other dialog answers controlled)")
             fflush(stdout)

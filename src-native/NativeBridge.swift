@@ -14,14 +14,16 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
     private var authorizedDirectories = Set<String>()
     private let settingsManager: SettingsManager
     private let draftsRoot: URL
+    private let documentsRoot: URL
 
     public override convenience init() {
         self.init(settingsManager: .shared)
     }
 
-    public init(settingsManager: SettingsManager, draftsDirectory: URL? = nil) {
+    public init(settingsManager: SettingsManager, draftsDirectory: URL? = nil, documentsDirectory: URL? = nil) {
         self.settingsManager = settingsManager
         self.draftsRoot = draftsDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!.appendingPathComponent("MoRead/Drafts", isDirectory: true)
+        self.documentsRoot = (documentsDirectory ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!).appendingPathComponent("Moread", isDirectory: true)
         super.init()
         self.fileWatcher = FileWatcher { [weak self] changedPath in
             self?.notifyFileChanged(changedPath)
@@ -52,6 +54,8 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
             handleOpenFolder(id: id)
         case "dialog:save-as":
             handleSaveAsDialog(id: id, payload: payload)
+        case "fs:save-to-documents":
+            handleSaveToDocuments(id: id, payload: payload)
         case "dialog:save-copy":
             handleSaveCopyDialog(id: id, payload: payload)
         case "export:pdf":
@@ -159,6 +163,35 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
     }
 
     private func handleSaveAsDialog(id: String, payload: [String: Any]) {
+        if let currentPath = payload["currentPath"] as? String, !currentPath.isEmpty {
+            handleSaveLocationDialog(id: id, payload: payload)
+            return
+        }
+        RunLoop.main.perform(inModes: [.default, .modalPanel]) { [weak self] in
+            guard let self, let window = self.windowController?.window else {
+                self?.sendResponse(id: id, result: ["canceled": true])
+                return
+            }
+            let alert = NSAlert()
+            alert.messageText = "保存新文档"
+            alert.informativeText = "“保存到文稿”会直接存入文稿/Moread，同名文件自动编号。也可以选择其他保存位置。"
+            alert.addButton(withTitle: "保存到文稿")
+            alert.addButton(withTitle: "取消")
+            alert.addButton(withTitle: "选择位置…")
+            alert.beginSheetModal(for: window) { response in
+                switch response {
+                case .alertFirstButtonReturn:
+                    self.handleSaveToDocuments(id: id, payload: payload)
+                case .alertThirdButtonReturn:
+                    self.handleSaveLocationDialog(id: id, payload: payload)
+                default:
+                    self.sendResponse(id: id, result: ["canceled": true])
+                }
+            }
+        }
+    }
+
+    private func handleSaveLocationDialog(id: String, payload: [String: Any]) {
         let currentPath = payload["currentPath"] as? String
         guard let content = payload["content"] as? String else {
             sendResponse(id: id, result: ["canceled": false, "success": false, "error": "缺少保存内容"])
@@ -211,6 +244,65 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
                     self.sendResponse(id: id, result: ["canceled": true])
                 }
             }
+        }
+    }
+
+    private func handleSaveToDocuments(id: String, payload: [String: Any]) {
+        guard let content = payload["content"] as? String else {
+            sendResponse(id: id, result: ["canceled": false, "success": false, "error": "缺少保存内容"])
+            return
+        }
+        var text = content
+        if payload["lineEnding"] as? String == "\r\n" {
+            text = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\n", with: "\r\n")
+        }
+        var data = Data(text.utf8)
+        if payload["hasBOM"] as? Bool == true { data.insert(contentsOf: [0xEF, 0xBB, 0xBF], at: 0) }
+        let proposed = payload["fileName"] as? String ?? "未命名"
+        let cleaned = proposed.components(separatedBy: CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/:\\"))).joined(separator: "_").trimmingCharacters(in: .whitespacesAndNewlines)
+        let stem = String(((cleaned as NSString).deletingPathExtension).prefix(60))
+        let name = stem.isEmpty || stem == "." || stem == ".." ? "未命名" : stem
+        do {
+            try FileManager.default.createDirectory(at: documentsRoot, withIntermediateDirectories: true)
+            // Anchor creation to the directory and never follow or replace existing entries.
+            let directory = open(documentsRoot.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard directory >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            defer { close(directory) }
+            var target: URL?
+            for index in 1...10000 {
+                let filename = index == 1 ? "\(name).md" : "\(name) (\(index)).md"
+                let descriptor = openat(directory, filename, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                if descriptor < 0 {
+                    if errno == EEXIST { continue }
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                defer { close(descriptor) }
+                do {
+                    try data.withUnsafeBytes { bytes in
+                        var offset = 0
+                        while offset < bytes.count {
+                            let count = write(descriptor, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                            if count < 0 && errno == EINTR { continue }
+                            guard count > 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+                            offset += count
+                        }
+                    }
+                    guard fsync(descriptor) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+                } catch {
+                    unlinkat(directory, filename, 0)
+                    throw error
+                }
+                target = documentsRoot.appendingPathComponent(filename)
+                break
+            }
+            guard let target else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(EEXIST)) }
+            authorizeFile(target.path, persist: true)
+            fileWatcher?.watch(filePath: target.path)
+            windowController?.allowLocalResources(forDocument: target.path)
+            sendResponse(id: id, result: ["canceled": false, "success": true, "filePath": target.path,
+                "stats": ["revision": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()]])
+        } catch {
+            sendResponse(id: id, result: ["canceled": false, "success": false, "error": "保存到文稿失败：\(error.localizedDescription)"])
         }
     }
 
@@ -570,7 +662,7 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
         let fileName = payload["fileName"] as? String ?? "当前文档"
         RunLoop.main.perform(inModes: [.default, .modalPanel]) { [weak self] in
             guard let self = self, let window = self.windowController?.window else {
-                self?.sendResponse(id: id, result: ["action": "dont-save"])
+                self?.sendResponse(id: id, result: ["action": "cancel"])
                 return
             }
             let alert = NSAlert()
@@ -579,6 +671,10 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
             alert.addButton(withTitle: "存储")
             alert.addButton(withTitle: "取消")
             alert.addButton(withTitle: "不存储")
+            if payload["isUntitled"] as? Bool == true {
+                alert.addButton(withTitle: "保存到文稿")
+                alert.informativeText += "\n“保存到文稿”会直接存入文稿/Moread，同名文件自动编号。"
+            }
             alert.alertStyle = .warning
 
             alert.beginSheetModal(for: window) { response in
@@ -587,8 +683,11 @@ public final class NativeBridge: NSObject, WKScriptMessageHandler, @unchecked Se
                     self.sendResponse(id: id, result: ["action": "save"])
                 case .alertSecondButtonReturn:
                     self.sendResponse(id: id, result: ["action": "cancel"])
-                default:
+                case .alertThirdButtonReturn:
                     self.sendResponse(id: id, result: ["action": "dont-save"])
+                default:
+                    let saveToDocuments = payload["isUntitled"] as? Bool == true && response.rawValue == NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + 3
+                    self.sendResponse(id: id, result: ["action": saveToDocuments ? "save-to-documents" : "cancel"])
                 }
             }
         }

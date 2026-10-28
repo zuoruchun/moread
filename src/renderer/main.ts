@@ -783,11 +783,11 @@ export class MoReadApp {
     if (tab.isEdited) {
       const revision = tab.editRevision;
       const path = tab.filePath;
-      const res = await window.electronAPI.confirmSaveDialog(tab.title);
+      const res = await window.electronAPI.confirmSaveDialog(tab.title, !tab.filePath);
       if (!this.tabs.includes(tab)) return true;
       if (tab.editRevision !== revision || tab.filePath !== path || this.isComposing) return false;
-      if (res.action === 'save') {
-        const saved = await this.saveTab(tab);
+      if (res.action === 'save' || res.action === 'save-to-documents') {
+        const saved = res.action === 'save-to-documents' ? await this.handleSaveAs(tab, true) : await this.saveTab(tab);
         if (!saved || tab.isEdited) return false;
       } else if (res.action !== 'dont-save') {
         return false;
@@ -1059,11 +1059,11 @@ export class MoReadApp {
           // Safe Exit Confirmation: Save / Discard / Cancel
           const revision = tab.editRevision;
           const path = tab.filePath;
-          const res = await window.electronAPI.confirmSaveDialog(tab.title);
+          const res = await window.electronAPI.confirmSaveDialog(tab.title, !tab.filePath);
           if (!this.tabs.includes(tab)) return;
           if (tab.editRevision !== revision || tab.filePath !== path || this.isComposing) return;
-          if (res.action === 'save') {
-            const success = await this.saveTab(tab);
+          if (res.action === 'save' || res.action === 'save-to-documents') {
+            const success = res.action === 'save-to-documents' ? await this.handleSaveAs(tab, true) : await this.saveTab(tab);
             if (success) {
               tab.isEditMode = false;
               if (this.activeTab === tab) this.updateUIForMode();
@@ -1503,9 +1503,10 @@ export class MoReadApp {
     }
   }
 
-  public async handleSaveAs(targetTab?: DocumentTab): Promise<boolean> {
+  public async handleSaveAs(targetTab?: DocumentTab, saveToDocuments = false): Promise<boolean> {
     const tab = targetTab ?? this.activeTab;
     if (!tab || !window.electronAPI) return false;
+    if (saveToDocuments && tab.filePath) return false;
 
     if (this.isComposing) return false;
     const content = this.getTabContent(tab);
@@ -1515,7 +1516,10 @@ export class MoReadApp {
     const previousState = tab.saveState;
     this.setSaveState('saving', tab);
     try {
-      const res = await window.electronAPI.saveAsDialog(tab.filePath || undefined, content, { hasBOM: tab.hasBOM, lineEnding: tab.lineEnding });
+      const options = { hasBOM: tab.hasBOM, lineEnding: tab.lineEnding };
+      const res = saveToDocuments
+        ? await window.electronAPI.saveToDocuments(tab.title, content, options)
+        : await window.electronAPI.saveAsDialog(tab.filePath || undefined, content, options);
       if (res.success === false) {
         this.setSaveState('failed', tab);
         this.showError(res.error || '另存为失败，当前修改仍保留');
@@ -1981,10 +1985,11 @@ export class MoReadApp {
       const { tab, revision, path } = state;
       if (!this.tabs.includes(tab) || tab.editRevision !== revision || tab.filePath !== path) return false;
       if (!tab.isEdited) continue;
-      const res = await window.electronAPI?.confirmSaveDialog(tab.title);
+      const res = await window.electronAPI?.confirmSaveDialog(tab.title, !tab.filePath);
       if (!this.tabs.includes(tab) || tab.editRevision !== revision || tab.filePath !== path || this.isComposing) return false;
-      if (res?.action === 'save') {
-        if (!await this.saveTab(tab) || tab.isEdited) return false;
+      if (res?.action === 'save' || res?.action === 'save-to-documents') {
+        const saved = res.action === 'save-to-documents' ? await this.handleSaveAs(tab, true) : await this.saveTab(tab);
+        if (!saved || tab.isEdited) return false;
         state.path = tab.filePath;
       } else if (res?.action !== 'dont-save') {
         return false;

@@ -60,6 +60,51 @@ describe('Markdown Parser & Academic Content Pipeline', () => {
     expect(html).toContain('<svg');
   });
 
+  it.each(['0<\\alpha<1', '0<E(t)<\\infty', '2\\pi', '1+2=3', '100', '0', '1.5\\sigma'])('renders numeric-leading inline math: %s', formula => {
+    const html = parseMarkdown(`固定 $${formula}$。`);
+    expect(html.match(/class="math-inline-wrapper"/g)).toHaveLength(1);
+    expect(html).toContain('<svg');
+    expect(html).not.toContain('data-raw-formula="。"');
+  });
+
+  it('keeps Proof.md adjacent formulas and punctuation in the correct pairs', () => {
+    const source = '固定 $0<\\alpha<1$、$\\sigma>0$、$r_0>0$ 和 $\\theta_0\\in\\mathbb T$。';
+    const html = parseMarkdown(source);
+    expect([...html.matchAll(/data-raw-formula="([^"]*)"/g)].map(match => match[1])).toEqual([
+      '0&lt;\\alpha&lt;1', '\\sigma&gt;0', 'r_0&gt;0', '\\theta_0\\in\\mathbb T'
+    ]);
+    expect(html.match(/<svg\b/g)).toHaveLength(4);
+    expect(html).not.toContain('data-raw-formula="、"');
+  });
+
+  it('accepts leading TeX whitespace in the Proof.md Caputo formula', () => {
+    const formula = '{}^CD_t^\\alpha\\nu_t=(\\sigma^2/2)\\partial_{\\theta\\theta}\\nu_t';
+    const html = parseMarkdown(`等价于 $ ${formula}$。`);
+    expect([...html.matchAll(/data-raw-formula="([^"]*)"/g)].map(match => match[1])).toEqual([formula]);
+    expect(html).toContain('<svg');
+  });
+
+  it('keeps currency literal alongside numeric-leading math', () => {
+    const html = parseMarkdown('Price $100 and $50. Next $2x$ and \\$20.');
+    expect(html.match(/class="math-inline-wrapper"/g)).toHaveLength(1);
+    expect(html).toContain('data-raw-formula="2x"');
+    expect(html).toContain('$100 and $50.');
+    expect(html).toContain('$20.');
+  });
+
+  it('keeps escaped dollars inside math without closing the formula early', () => {
+    const html = parseMarkdown('费用 $\\$5+x$，然后 $0<y$。');
+    expect([...html.matchAll(/data-raw-formula="([^"]*)"/g)].map(match => match[1])).toEqual(['\\$5+x', '0&lt;y']);
+    expect(html.match(/<svg\b/g)).toHaveLength(2);
+  });
+
+  it('does not join separate lines or unclosed math to a later formula', () => {
+    const html = parseMarkdown('未闭合 $0<x\n\n下一段 $2y$。');
+    expect(html.match(/class="math-inline-wrapper"/g)).toHaveLength(1);
+    expect(html).toContain('data-raw-formula="2y"');
+    expect(html).toContain('$0&lt;x');
+  });
+
   it('should render display math with $$...$$ and \\[...\\]', () => {
     const md = '$$\n\\int_0^1 x^2 \\mathrm{d}x = \\frac{1}{3}\n$$\n\n\\[\n\\sum_{n=1}^\\infty \\frac{1}{n^2} = \\frac{\\pi^2}{6}\n\\]';
     const html = parseMarkdown(md, { currentFilePath: '/test/doc.md' });

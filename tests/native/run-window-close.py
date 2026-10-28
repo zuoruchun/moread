@@ -15,7 +15,7 @@ with tempfile.TemporaryDirectory(prefix="moread-window-close-") as folder:
     bridge = (repo / "src-native/NativeBridge.swift").read_text()
     original = "self.init(settingsManager: .shared)"
     assert bridge.count(original) == 1
-    bridge = bridge.replace(original, f"self.init(settingsManager: .shared, draftsDirectory: URL(fileURLWithPath: {json.dumps(str(root / 'Drafts'))}))")
+    bridge = bridge.replace(original, f"self.init(settingsManager: .shared, draftsDirectory: URL(fileURLWithPath: {json.dumps(str(root / 'Drafts'))}), documentsDirectory: URL(fileURLWithPath: {json.dumps(str(root / 'Documents'))}))")
     (root / "NativeBridge.swift").write_text(bridge)
     sources = [repo / "src-native" / name for name in [
         "AppDelegate.swift", "MainWindowController.swift", "PDFExporter.swift",

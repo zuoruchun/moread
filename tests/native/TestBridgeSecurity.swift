@@ -35,7 +35,7 @@ final class BridgeSecurityTests: NSObject, NSApplicationDelegate, WKScriptMessag
             try JSONSerialization.data(withJSONObject: legacy).write(to: drafts.appendingPathComponent("legacy__document.json"))
             try Data("blocking regular file".utf8).write(to: fixture.appendingPathComponent("blocked"))
             settings = SettingsManager(configURL: fixture.appendingPathComponent("settings/config.json"))
-            bridge = NativeBridge(settingsManager: settings, draftsDirectory: drafts)
+            bridge = NativeBridge(settingsManager: settings, draftsDirectory: drafts, documentsDirectory: fixture.appendingPathComponent("Documents"))
             let configuration = WKWebViewConfiguration()
             configuration.userContentController.add(self, name: "nativeAPI")
             configuration.userContentController.add(self, name: "result")
@@ -60,7 +60,7 @@ final class BridgeSecurityTests: NSObject, NSApplicationDelegate, WKScriptMessag
             bridge.sendResponse(id: body["id"] as! String, result: ["success": true])
         } else if body["action"] as? String == "test:restart" {
             bridge.stopWatchingFiles()
-            bridge = NativeBridge(settingsManager: SettingsManager(configURL: fixture.appendingPathComponent("settings/config.json")), draftsDirectory: fixture.appendingPathComponent("drafts"))
+            bridge = NativeBridge(settingsManager: SettingsManager(configURL: fixture.appendingPathComponent("settings/config.json")), draftsDirectory: fixture.appendingPathComponent("drafts"), documentsDirectory: fixture.appendingPathComponent("Documents"))
             bridge.windowController = host
             bridge.sendResponse(id: body["id"] as! String, result: ["success": true])
         } else if body["action"] as? String == "test:watcher-fds" {
@@ -74,7 +74,18 @@ final class BridgeSecurityTests: NSObject, NSApplicationDelegate, WKScriptMessag
             bridge.sendResponse(id: body["id"] as! String, result: ["count": count])
         } else if body["action"] as? String == "test:blocked-drafts" {
             bridge.stopWatchingFiles()
-            bridge = NativeBridge(settingsManager: settings, draftsDirectory: fixture.appendingPathComponent("blocked"))
+            bridge = NativeBridge(settingsManager: settings, draftsDirectory: fixture.appendingPathComponent("blocked"), documentsDirectory: fixture.appendingPathComponent("Documents"))
+            bridge.windowController = host
+            bridge.sendResponse(id: body["id"] as! String, result: ["success": true])
+        } else if body["action"] as? String == "test:blocked-documents" || body["action"] as? String == "test:linked-documents" {
+            let linked = body["action"] as? String == "test:linked-documents"
+            let root = fixture.appendingPathComponent(linked ? "linked-documents" : "blocked")
+            if linked {
+                try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                try! FileManager.default.createSymbolicLink(at: root.appendingPathComponent("Moread"), withDestinationURL: fixture.appendingPathComponent("outside"))
+            }
+            bridge.stopWatchingFiles()
+            bridge = NativeBridge(settingsManager: settings, draftsDirectory: fixture.appendingPathComponent("drafts"), documentsDirectory: root)
             bridge.windowController = host
             bridge.sendResponse(id: body["id"] as! String, result: ["success": true])
         } else {
@@ -167,6 +178,22 @@ final class BridgeSecurityTests: NSObject, NSApplicationDelegate, WKScriptMessag
         await api('fs:unwatch-file', {filePath: root + '/allowed/../allowed/doc.md'});
         await new Promise(resolve => setTimeout(resolve, 100));
         check((await api('test:watcher-fds')).count === 0, 'Normalized unwatch path did not release descriptors');
+        const saved = await api('fs:save-to-documents', {fileName:'笔记.md', content:'# 文稿\n第二行', hasBOM:true, lineEnding:'\r\n'});
+        check(saved.success && saved.filePath === root + '/Documents/Moread/笔记.md', 'Documents folder was not created at the fixed destination');
+        const document = await api('fs:read-file', {filePath:saved.filePath});
+        check(document.content === '# 文稿\n第二行' && document.stats.hasBOM && document.stats.lineEnding === '\r\n', 'Documents save lost content or encoding');
+        check(saved.stats.revision === document.stats.revision, 'Documents save returned an incorrect revision');
+        const duplicate = await api('fs:save-to-documents', {fileName:'笔记.md', content:'second'});
+        check(duplicate.success && duplicate.filePath.endsWith('/笔记 (2).md'), 'Duplicate name was not numbered');
+        check((await api('fs:read-file', {filePath:saved.filePath})).content === document.content, 'Duplicate save overwrote the first file');
+        const simultaneous = await Promise.all(Array.from({length:8}, (_, i) => api('fs:save-to-documents', {fileName:'并发', content:String(i)})));
+        check(simultaneous.every(r => r.success) && new Set(simultaneous.map(r => r.filePath)).size === 8, 'Concurrent saves collided');
+        const escaped = await api('fs:save-to-documents', {fileName:'../../outside/secret.md', content:'contained'});
+        check(escaped.success && escaped.filePath.startsWith(root + '/Documents/Moread/') && !escaped.filePath.slice((root + '/Documents/Moread/').length).includes('/'), 'Documents filename escaped destination');
+        await api('test:linked-documents');
+        check(!(await api('fs:save-to-documents', {fileName:'secret', content:'corrupt'})).success, 'Documents symlink escaped destination');
+        await api('test:blocked-documents');
+        check(!(await api('fs:save-to-documents', {content:'preserve editing'})).success, 'Blocked Documents destination falsely reported success');
         await api('test:blocked-drafts');
         check(!(await api('drafts:save', {id: 'must-fail', content: 'preserve editing'})).success, 'Failed draft write falsely reported success');
         window.webkit.messageHandlers.result.postMessage({success: true, detail: passed + ' production bridge checks passed'});

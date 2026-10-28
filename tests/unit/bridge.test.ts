@@ -94,6 +94,20 @@ describe('Native WebKit Bridge', () => {
     }
   });
 
+  it('passes untitled confirmation and Documents save options to the native bridge', async () => {
+    const confirm = window.electronAPI.confirmSaveDialog('未命名', true);
+    const confirmCall = mockPostMessage.mock.calls[0][0];
+    expect(confirmCall.payload).toEqual({ fileName: '未命名', isUntitled: true });
+    window.handleNativeResponse!(confirmCall.id, { action: 'save-to-documents' });
+    expect((await confirm).action).toBe('save-to-documents');
+    const save = window.electronAPI.saveToDocuments('笔记', '# 内容', { hasBOM: true, lineEnding: '\r\n' });
+    const saveCall = mockPostMessage.mock.calls[1][0];
+    expect(saveCall.action).toBe('fs:save-to-documents');
+    expect(saveCall.payload).toEqual({ fileName: '笔记', content: '# 内容', hasBOM: true, lineEnding: '\r\n' });
+    window.handleNativeResponse!(saveCall.id, { canceled: false, success: true, filePath: '/Documents/Moread/笔记.md' });
+    expect((await save).success).toBe(true);
+  });
+
   it('dispatches app:open-file event to registered callback', () => {
     const cb = vi.fn();
     const unsubscribe = window.electronAPI.onOpenFile(cb);

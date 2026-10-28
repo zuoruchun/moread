@@ -166,7 +166,9 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
 
   // 3. Extract and protect Inline Math: $ ... $ and \( ... \)
   const inlineMathList: string[] = [];
-  protectedContent = protectedContent.replace(/(?<!\\)\$(?!\d|\s)([^\s$]|(?:[^\s$].*?[^\s$]))\$(?!\d)/g, (_, math) => {
+  // Digits and leading TeX whitespace may start math. Stop at unescaped delimiters instead of crossing into the next formula;
+  // a closing dollar before a digit remains literal for currency such as "$100 and $50".
+  protectedContent = protectedContent.replace(/(?<!\\)\$(?!\$)((?:\\[^\r\n]|[^\\$\r\n])+?)(?<!\s)\$(?!\d)/g, (_, math) => {
     const idx = inlineMathList.length;
     inlineMathList.push(math.trim());
     return `@@@MATH_INLINE_${idx}@@@`;

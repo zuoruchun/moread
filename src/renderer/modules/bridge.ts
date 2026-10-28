@@ -16,6 +16,7 @@ export interface BridgeAPI {
   openFileDialog: () => Promise<{ canceled: boolean; filePath?: string }>;
   openFolderDialog: () => Promise<{ canceled: boolean; folderPath?: string }>;
   saveAsDialog: (currentPath?: string, content?: string, options?: { hasBOM?: boolean; lineEnding?: string }) => Promise<{ canceled: boolean; filePath?: string; success?: boolean; error?: string; stats?: { revision?: string } }>;
+  saveToDocuments: (fileName: string, content: string, options?: { hasBOM?: boolean; lineEnding?: string }) => ReturnType<BridgeAPI['saveAsDialog']>;
   saveCopyDialog: (currentPath?: string, content?: string) => Promise<{ canceled: boolean; filePath?: string; success?: boolean; error?: string }>;
   exportPDF: () => Promise<{ success: boolean; error?: string }>;
   saveDraft: (draft: RecoveryDraft) => Promise<{ success: boolean }>;
@@ -27,7 +28,7 @@ export interface BridgeAPI {
   unwatchFile?: (filePath: string) => Promise<{ success: boolean }>;
   writeFile: (filePath: string, content: string, expectedRevision?: string, options?: { hasBOM?: boolean; lineEnding?: string }) => Promise<{ success: boolean; error?: string; stats?: { size: number; mtime: number; revision?: string } }>;
   setDocumentEdited: (isEdited: boolean) => Promise<{ success: boolean }>;
-  confirmSaveDialog: (fileName: string) => Promise<{ action: 'save' | 'dont-save' | 'cancel' }>;
+  confirmSaveDialog: (fileName: string, isUntitled?: boolean) => Promise<{ action: 'save' | 'save-to-documents' | 'dont-save' | 'cancel' }>;
   closeWindow: () => Promise<{ success: boolean }>;
   readFolder: (folderPath: string) => Promise<{ success: boolean; nodes?: any[]; error?: string }>;
   showInFolder: (filePath: string) => Promise<void>;
@@ -150,6 +151,7 @@ export function initNativeBridge(): BridgeAPI {
       openFileDialog: () => callNative('dialog:open-file', undefined, 0),
       openFolderDialog: () => callNative('dialog:open-folder', undefined, 0),
       saveAsDialog: (currentPath?: string, content?: string, options?: { hasBOM?: boolean; lineEnding?: string }) => callNative('dialog:save-as', { currentPath, content, ...options }, 0),
+      saveToDocuments: (fileName: string, content: string, options?: { hasBOM?: boolean; lineEnding?: string }) => callNative('fs:save-to-documents', { fileName, content, ...options }, 0),
       saveCopyDialog: (currentPath?: string, content?: string) => callNative('dialog:save-copy', { currentPath, content }, 0),
       exportPDF: () => callNative('export:pdf', undefined, 0),
       saveDraft: (draft) => callNative('drafts:save', draft),
@@ -161,7 +163,7 @@ export function initNativeBridge(): BridgeAPI {
       unwatchFile: (filePath: string) => callNative('fs:unwatch-file', { filePath }),
       writeFile: (filePath: string, content: string, expectedRevision?: string, options?: { hasBOM?: boolean; lineEnding?: string }) => callNative('fs:write-file', { filePath, content, expectedRevision, ...options }),
       setDocumentEdited: (isEdited: boolean) => callNative('window:set-edited', { isEdited }),
-      confirmSaveDialog: (fileName: string) => callNative('dialog:confirm-save', { fileName }, 0),
+      confirmSaveDialog: (fileName: string, isUntitled?: boolean) => callNative('dialog:confirm-save', { fileName, isUntitled }, 0),
       closeWindow: () => callNative('window:close'),
       readFolder: (folderPath: string) => callNative('fs:read-folder', { folderPath }),
       showInFolder: (filePath: string) => callNative('fs:show-in-folder', { filePath }),

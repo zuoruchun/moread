@@ -43,6 +43,17 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             try "# 子目录".write(to: fixtures.appendingPathComponent("nested/另一个.md"), atomically: true, encoding: .utf8)
             try "# 自动保存测试\n".write(to: fixtures.appendingPathComponent("自动保存.md"), atomically: true, encoding: .utf8)
             try "# 公式编辑\n\n行内 $x+1$ 文字\n\n$$\ny^2\n$$\n".write(to: fixtures.appendingPathComponent("公式.md"), atomically: true, encoding: .utf8)
+            try #"""
+            # 数字开头的行内公式
+
+            固定 $0<\alpha<1$、$\sigma>0$、$r_0>0$ 和 $\theta_0\in\mathbb T=\mathbb R/(2\pi\mathbb Z)$。
+
+            对每个 $t>0$ 有 $0<E(t)<\infty$。
+
+            等价于 $ {}^CD_t^\alpha\nu_t=(\sigma^2/2)\partial_{\theta\theta}\nu_t$。
+
+            Price $100 and $50. Also \$20 discount.
+            """#.write(to: fixtures.appendingPathComponent("数字公式.md"), atomically: true, encoding: .utf8)
             try "# İXYZ\n\n中文 **XYZ** 和 XYZ\n\n```text\nXYZ \\\\ XYZ\n```\n\n$\\frac{x}{2}$\n\n前$x$后\n".write(to: fixtures.appendingPathComponent("查找替换.md"), atomically: true, encoding: .utf8)
             try #"""
             # 代码编辑测试
@@ -431,6 +442,27 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
     }
     """#
 
+    var numericMathRegressionScript: String {
+        #"""
+        async function(a, api, root, check) {
+          await a.loadFile(root + '/数字公式.md');
+          const wrappers = () => [...a.markdownBodyEl.querySelectorAll('.math-inline-wrapper')];
+          const expected = ['0<\\alpha<1', '\\sigma>0', 'r_0>0', '\\theta_0\\in\\mathbb T=\\mathbb R/(2\\pi\\mathbb Z)', 't>0', '0<E(t)<\\infty', '{}^CD_t^\\alpha\\nu_t=(\\sigma^2/2)\\partial_{\\theta\\theta}\\nu_t'];
+          check(JSON.stringify(wrappers().map(el => el.dataset.rawFormula)) === JSON.stringify(expected), 'Numeric-leading and adjacent inline formulas retain their exact boundaries');
+          check(wrappers().every(el => el.querySelector('svg')?.getBoundingClientRect().width > 0), 'Every numeric-leading formula has visible SVG output');
+          check(a.markdownBodyEl.textContent.includes('Price $100 and $50. Also $20 discount.'), 'Currency and escaped dollar amounts remain literal in WebKit');
+          const visible = a.markdownBodyEl.cloneNode(true);
+          visible.querySelectorAll('.math-inline-wrapper').forEach(el => el.remove());
+          check(visible.textContent.includes('固定 、、 和 ') && !visible.textContent.includes('\\alpha'), 'Formula separators stay outside rendered math without leaked TeX');
+          a.toggleSourceView();
+          check(expected.every(formula => a.sourceTextareaEl.value.includes('$' + formula + '$') || a.sourceTextareaEl.value.includes('$ ' + formula + '$')), 'Source view preserves all numeric-leading formula delimiters');
+          a.toggleSourceView();
+          check(JSON.stringify(wrappers().map(el => el.dataset.rawFormula)) === JSON.stringify(expected) && wrappers().every(el => el.querySelector('svg')), 'Numeric formulas survive rendered/source roundtrip');
+          await a.closeTab(a.activeTab.id);
+        }
+        """#
+    }
+
     func runInteractions() {
         let fixtureJSON = String(data: try! JSONSerialization.data(withJSONObject: [fixtures.path]), encoding: .utf8)!
         webView.evaluateJavaScript("""
@@ -469,6 +501,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             click('btn-view-rendered');
             check(a.isEditMode && !a.isSourceMode && pressed('btn-view-rendered') && a.markdownBodyEl.contentEditable === 'true', 'Edit/body mode is explicit');
             check([...document.querySelectorAll('.header-right button')].every(el => el.getBoundingClientRect().right <= innerWidth), 'Mode controls fit the narrow native window');
+            await (\(numericMathRegressionScript))(a, window.electronAPI, root, check);
             await (\(pasteRegressionScript))(a, window.electronAPI, root, check);
 
             click('btn-toggle-sidebar'); click('tab-files'); click('btn-toggle-sidebar'); click('btn-toggle-sidebar');
