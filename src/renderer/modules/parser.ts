@@ -129,11 +129,15 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
   let headingIndex = 0;
 
   // 1. Temporarily protect code blocks and inline code from math delimiter matching
+  // Choose a namespace absent from this document, including its code and literal examples.
+  let markerPrefix = '@@@MOREAD_';
+  while (content.includes(markerPrefix)) markerPrefix += '_';
+  const markerPattern = (kind: string) => new RegExp(`${markerPrefix}${kind}_(\\d+)@@@`, 'g');
   const codeBlocks: string[] = [];
   const protectCode = (match: string): string => {
     const idx = codeBlocks.length;
     codeBlocks.push(match);
-    return `@@@CODE_BLOCK_${idx}@@@`;
+    return `${markerPrefix}CODE_${idx}@@@`;
   };
   const lines = content.split('\n');
   const offsets = [0];
@@ -148,41 +152,51 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
     const to = Math.min(content.length, offsets[end]);
     protectedContent = protectedContent.slice(0, from) + protectCode(content.slice(from, to)) + protectedContent.slice(to);
   }
-  protectedContent = protectedContent.replace(/(`+)[^\n]*?\1(?!`)/g, protectCode);
+  // Code spans may cross line breaks and contain shorter backtick runs, but not blank paragraphs.
+  protectedContent = protectedContent.replace(/(?<![\\`])(`+)(?!`)((?:(?!\n[ \t]*\n)[\s\S])*?)(?<!`)\1(?!`)/g, protectCode);
 
   // 2. Extract and protect Display Math: $$ ... $$ and \[ ... \]
   const displayMathList: string[] = [];
   protectedContent = protectedContent.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
     const idx = displayMathList.length;
     displayMathList.push(math.trim());
-    return `@@@MATH_DISPLAY_${idx}@@@`;
+    return `${markerPrefix}DISPLAY_${idx}@@@`;
   });
 
   protectedContent = protectedContent.replace(/\\\[([\s\S]+?)\\\]/g, (_, math) => {
     const idx = displayMathList.length;
     displayMathList.push(math.trim());
-    return `@@@MATH_DISPLAY_${idx}@@@`;
+    return `${markerPrefix}DISPLAY_${idx}@@@`;
   });
 
   // 3. Extract and protect Inline Math: $ ... $ and \( ... \)
   const inlineMathList: string[] = [];
   // Digits and leading TeX whitespace may start math. Stop at unescaped delimiters instead of crossing into the next formula;
   // a closing dollar before a digit remains literal for currency such as "$100 and $50".
-  protectedContent = protectedContent.replace(/(?<!\\)\$(?!\$)((?:\\[^\r\n]|[^\\$\r\n])+?)(?<!\s)\$(?!\d)/g, (_, math) => {
+  const inlineDollar = /(?<!\\)\$(?!\$)((?:\\[^\r\n]|[^\\$\r\n])+?)(?<!\s)\$(?!\d)/g;
+  let inlineContent = '';
+  let inlineOffset = 0;
+  let match: RegExpExecArray | null;
+  while ((match = inlineDollar.exec(protectedContent))) {
+    const math = match[1];
+    // An unclosed price followed by prose must not consume the opening dollar of the next formula.
+    const numericProse = /^\s*\d[\d,.]*(?:\s+[A-Za-z]{2,}|[\p{Script=Han}，。；：、])/u.test(math)
+      && !/[\\^_{}=<>+*/-]/.test(math);
+    if (numericProse && /[A-Za-z\\{]/.test(protectedContent[inlineDollar.lastIndex] || '')) {
+      inlineDollar.lastIndex = match.index + 1;
+      continue;
+    }
     const idx = inlineMathList.length;
     inlineMathList.push(math.trim());
-    return `@@@MATH_INLINE_${idx}@@@`;
-  });
+    inlineContent += protectedContent.slice(inlineOffset, match.index) + `${markerPrefix}INLINE_${idx}@@@`;
+    inlineOffset = inlineDollar.lastIndex;
+  }
+  protectedContent = inlineContent + protectedContent.slice(inlineOffset);
 
   protectedContent = protectedContent.replace(/\\\(([\s\S]+?)\\\)/g, (_, math) => {
     const idx = inlineMathList.length;
     inlineMathList.push(math.trim());
-    return `@@@MATH_INLINE_${idx}@@@`;
-  });
-
-  // 4. Restore code blocks before Markdown-it parsing so syntax highlighting works
-  protectedContent = protectedContent.replace(/@@@CODE_BLOCK_(\d+)@@@/g, (_, idx) => {
-    return codeBlocks[parseInt(idx, 10)];
+    return `${markerPrefix}INLINE_${idx}@@@`;
   });
 
   // 5. Override heading rendering to assign IDs for anchors
@@ -199,13 +213,16 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
   protectedContent = protectedContent.replace(/^(\s*[-*+]\s+)\[ \]\s+/gm, `$1<input type="checkbox" ${disabledAttr}class="task-list-item-checkbox"> `);
   protectedContent = protectedContent.replace(/^(\s*[-*+]\s+)\[[xX]\]\s+/gm, `$1<input type="checkbox" ${disabledAttr}checked class="task-list-item-checkbox"> `);
 
+  // Restore code only after every source-level substitution, preserving literal task markers.
+  protectedContent = protectedContent.replace(markerPattern('CODE'), (_, idx) => codeBlocks[parseInt(idx, 10)]);
+
   // 7. Parse with Markdown-it
   let renderedHtml = md.render(protectedContent, { readonly: isReadonly });
 
   const MAX_MATH_COUNT = 500;
 
   // 8. Replace Display Math placeholders with MathJax SVG (with quota protection)
-  renderedHtml = renderedHtml.replace(/@@@MATH_DISPLAY_(\d+)@@@/g, (_, idxStr) => {
+  renderedHtml = renderedHtml.replace(markerPattern('DISPLAY'), (_, idxStr) => {
     const idx = parseInt(idxStr, 10);
     const formula = displayMathList[idx];
     if (idx >= MAX_MATH_COUNT) {
@@ -215,7 +232,7 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
   });
 
   // 9. Replace Inline Math placeholders with MathJax SVG (with quota protection)
-  renderedHtml = renderedHtml.replace(/@@@MATH_INLINE_(\d+)@@@/g, (_, idxStr) => {
+  renderedHtml = renderedHtml.replace(markerPattern('INLINE'), (_, idxStr) => {
     const idx = parseInt(idxStr, 10);
     const formula = inlineMathList[idx];
     if (idx >= MAX_MATH_COUNT) {

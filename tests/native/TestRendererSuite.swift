@@ -54,6 +54,26 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
 
             Price $100 and $50. Also \$20 discount.
             """#.write(to: fixtures.appendingPathComponent("数字公式.md"), atomically: true, encoding: .utf8)
+            try #"""
+            # 解析边界保护
+
+            ```text
+            - [ ] literal checklist
+            - [x] done
+            ```
+
+            `first line
+            $0<x$
+            last line`
+
+            售价 $100，参数为$x$。
+
+            占位文本 `@@@MATH_INLINE_0@@@` 和 @@@MATH_DISPLAY_0@@@。
+
+            - [ ] Real task
+
+            可编辑正文。
+            """#.write(to: fixtures.appendingPathComponent("边界保护.md"), atomically: true, encoding: .utf8)
             try "# İXYZ\n\n中文 **XYZ** 和 XYZ\n\n```text\nXYZ \\\\ XYZ\n```\n\n$\\frac{x}{2}$\n\n前$x$后\n".write(to: fixtures.appendingPathComponent("查找替换.md"), atomically: true, encoding: .utf8)
             try #"""
             # 代码编辑测试
@@ -463,6 +483,33 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
         """#
     }
 
+    var parserBoundaryRegressionScript: String {
+        #"""
+        async function(a, api, root, check) {
+          const path = root + '/边界保护.md';
+          await a.loadFile(path);
+          const code = a.markdownBodyEl.querySelector('textarea.code-editor');
+          check(code?.value === '- [ ] literal checklist\n- [x] done', 'Task markers stay literal in the actual code editor');
+          check(a.markdownBodyEl.querySelectorAll('input.task-list-item-checkbox').length === 1, 'Only the actual task list creates a checkbox');
+          check(!a.markdownBodyEl.querySelector('code .math-inline-wrapper') && [...a.markdownBodyEl.querySelectorAll('code')].some(el => el.textContent === 'first line $0<x$ last line'), 'Multiline inline code never renders a formula');
+          check(JSON.stringify([...a.markdownBodyEl.querySelectorAll('.math-inline-wrapper')].map(el => el.dataset.rawFormula)) === '["x"]' && a.markdownBodyEl.textContent.includes('售价 $100，参数为'), 'Currency does not consume the next formula');
+          check(a.markdownBodyEl.textContent.includes('@@@MATH_INLINE_0@@@') && a.markdownBodyEl.textContent.includes('@@@MATH_DISPLAY_0@@@'), 'Literal placeholder examples display without throwing');
+          const paragraph = [...a.markdownBodyEl.querySelectorAll('p')].find(el => el.textContent === '可编辑正文。');
+          const range = document.createRange(); range.selectNodeContents(paragraph); range.collapse(false);
+          const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+          a.markdownBodyEl.focus(); document.execCommand('insertText', false, '追加编辑');
+          check(await a.saveCurrentFile(), 'Unrelated rendered text edit saves successfully');
+          const saved = await api.readFile(path);
+          check(saved.success && saved.content.includes('- [ ] literal checklist\n- [x] done') && !saved.content.includes('<input') && saved.content.includes('追加编辑'), 'Real disk save preserves code checklist bytes while saving the text edit');
+          a.toggleSourceView();
+          check(a.sourceTextareaEl.value.includes('@@@MATH_INLINE_0@@@') && a.sourceTextareaEl.value.includes('售价 $100，参数为$x$。'), 'Source roundtrip preserves literal placeholders and currency');
+          a.toggleSourceView();
+          check(!a.markdownBodyEl.querySelector('code .math-inline-wrapper') && a.markdownBodyEl.querySelector('textarea.code-editor').value === '- [ ] literal checklist\n- [x] done', 'Code remains intact after rendered/source roundtrip');
+          await a.closeTab(a.activeTab.id);
+        }
+        """#
+    }
+
     func runInteractions() {
         let fixtureJSON = String(data: try! JSONSerialization.data(withJSONObject: [fixtures.path]), encoding: .utf8)!
         webView.evaluateJavaScript("""
@@ -502,6 +549,7 @@ final class RendererTests: NSObject, NSApplicationDelegate, WKScriptMessageHandl
             check(a.isEditMode && !a.isSourceMode && pressed('btn-view-rendered') && a.markdownBodyEl.contentEditable === 'true', 'Edit/body mode is explicit');
             check([...document.querySelectorAll('.header-right button')].every(el => el.getBoundingClientRect().right <= innerWidth), 'Mode controls fit the narrow native window');
             await (\(numericMathRegressionScript))(a, window.electronAPI, root, check);
+            await (\(parserBoundaryRegressionScript))(a, window.electronAPI, root, check);
             await (\(pasteRegressionScript))(a, window.electronAPI, root, check);
 
             click('btn-toggle-sidebar'); click('tab-files'); click('btn-toggle-sidebar'); click('btn-toggle-sidebar');

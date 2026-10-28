@@ -126,6 +126,53 @@ describe('Markdown Parser & Academic Content Pipeline', () => {
     expect(html).toContain('$$ not math $$');
   });
 
+  it.each(['```text\n- [ ] literal\n- [x] done\n```', '~~~text\n- [ ] literal\n- [x] done\n~~~', '    - [ ] literal\n    - [x] done'])('keeps task markers literal inside code: %s', source => {
+    const html = parseMarkdown(source, { readonly: false });
+    expect(html).toContain('- [ ] literal');
+    expect(html).toContain('- [x] done');
+    expect(html).not.toContain('task-list-item-checkbox');
+    const rawCode = html.match(/data-code="([^"]*)"/);
+    if (rawCode) expect(decodeURIComponent(rawCode[1])).toBe('- [ ] literal\n- [x] done');
+  });
+
+  it('renders real task items without changing matching text in inline or fenced code', () => {
+    const html = parseMarkdown('- [ ] Real task\n\n`- [ ] inline code`\n\n```text\n- [x] literal code\n```');
+    expect(html.match(/class="task-list-item-checkbox"/g)).toHaveLength(1);
+    expect(html).toContain('- [ ] inline code');
+    expect(html).toContain('- [x] literal code');
+  });
+
+  it.each(['`first line\n$0<x$\nlast line`', '``first `quoted` line\n$0<x$\nlast line``'])('keeps multiline code spans literal: %s', source => {
+    const html = parseMarkdown(source);
+    expect(html).toContain('$0&lt;x$');
+    expect(html).not.toContain('math-inline-wrapper');
+    expect(html).not.toContain('<svg');
+  });
+
+  it('does not let an unmatched backtick protect math in a different paragraph', () => {
+    const html = parseMarkdown('unmatched ` opener\n\nFormula $0<x$.\n\nclosing ` elsewhere');
+    expect(html).toContain('data-raw-formula="0&lt;x"');
+  });
+
+  it.each(['@@@MATH_INLINE_0@@@', '@@@MATH_DISPLAY_0@@@', '@@@CODE_BLOCK_0@@@', '@@@MOREAD_CODE_0@@@ @@@MOREAD__INLINE_0@@@'])('keeps literal placeholder examples without collisions: %s', literal => {
+    const html = parseMarkdown(`文本 ${literal}\n\n\`${literal}\`\n\n正常 $0<x$。`);
+    expect(html).toContain(literal);
+    expect(html.match(/class="math-inline-wrapper"/g)).toHaveLength(1);
+    expect(html).toContain('data-raw-formula="0&lt;x"');
+    expect(html).not.toContain('undefined');
+  });
+
+  it.each(['售价 $100，参数为$x$。', '售价 $100元，参数为$x$。', 'Price $100 and parameter $x$.'])('keeps an unclosed price from consuming the next formula: %s', source => {
+    const html = parseMarkdown(source);
+    expect([...html.matchAll(/data-raw-formula="([^"]*)"/g)].map(match => match[1])).toEqual(['x']);
+    expect(html).toContain('$100');
+  });
+
+  it('keeps explicitly closed numeric text formulas and coefficients as math', () => {
+    const html = parseMarkdown('$100美元$ 和 $2xy$、$2\\pi$。');
+    expect([...html.matchAll(/data-raw-formula="([^"]*)"/g)].map(match => match[1])).toEqual(['100美元', '2xy', '2\\pi']);
+  });
+
   it('should strip dangerous XSS scripts, handlers, and dangerous hrefs', () => {
     const md = '<script>alert("xss")</script>\n\n<img src="invalid.jpg" onerror="alert(1)">\n\n[Click](javascript:alert(1))';
     const html = parseMarkdown(md, { currentFilePath: '/test/doc.md' });
