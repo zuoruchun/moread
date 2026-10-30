@@ -15,6 +15,7 @@ public final class FileWatcher: @unchecked Sendable {
         var source: DispatchSourceFileSystemObject?
         var directorySource: DispatchSourceFileSystemObject?
         var identity: FileIdentity?
+        var directoryGeneration = UUID()
         var sourceGeneration = UUID()
         var notificationGeneration = UUID()
         var notification: DispatchWorkItem?
@@ -66,16 +67,36 @@ public final class FileWatcher: @unchecked Sendable {
     private func startDirectoryWatcher(path: String, watch: Watch) {
         // A file source follows its inode, so also watch the containing directory
         // to discover a replacement even when the original path was absent for a while.
+        guard watch.directorySource == nil else { return }
         let directory = URL(fileURLWithPath: path).deletingLastPathComponent().path
         let descriptor = open(directory, O_EVTONLY)
-        guard descriptor >= 0 else { return }
+        guard descriptor >= 0 else {
+            queue.asyncAfter(deadline: .now() + 0.25) { [weak self, weak watch] in
+                guard let self, let watch, !self.isStopped, self.watches[path] === watch else { return }
+                self.startDirectoryWatcher(path: path, watch: watch)
+                if self.refreshFileSource(path: path, watch: watch) {
+                    self.scheduleDebouncedNotification(path: path, watch: watch)
+                }
+            }
+            return
+        }
+        let generation = UUID()
+        watch.directoryGeneration = generation
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: descriptor,
             eventMask: [.write, .delete, .rename],
             queue: queue
         )
         source.setEventHandler { [weak self, weak watch] in
-            guard let self, let watch, !self.isStopped, self.watches[path] === watch else { return }
+            guard let self, let watch, !self.isStopped, self.watches[path] === watch,
+                  watch.directoryGeneration == generation else { return }
+            var current = stat()
+            var opened = stat()
+            if stat(directory, &current) != 0 || fstat(descriptor, &opened) != 0 || FileIdentity(current) != FileIdentity(opened) {
+                watch.directorySource?.cancel()
+                watch.directorySource = nil
+                self.startDirectoryWatcher(path: path, watch: watch)
+            }
             if self.refreshFileSource(path: path, watch: watch) {
                 self.scheduleDebouncedNotification(path: path, watch: watch)
             }

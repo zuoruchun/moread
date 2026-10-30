@@ -61,7 +61,13 @@ function generateSlug(text: string, countMap: Map<string, number>): string {
   const count = countMap.get(slug) || 0;
   countMap.set(slug, count + 1);
 
-  return count === 0 ? slug : `${slug}-${count}`;
+  let candidate = count === 0 ? slug : `${slug}-${count}`;
+  while (countMap.has(`\0${candidate}`)) {
+    countMap.set(slug, countMap.get(slug)! + 1);
+    candidate = `${slug}-${countMap.get(slug)}`;
+  }
+  countMap.set(`\0${candidate}`, 1);
+  return candidate;
 }
 
 // Custom sanitizer fallback for Node test environments where browser DOM is absent
@@ -157,20 +163,34 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
 
   // 2. Extract and protect Display Math: $$ ... $$ and \[ ... \]
   const displayMathList: string[] = [];
-  protectedContent = protectedContent.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
+  const displayLiterals: string[] = [];
+  const displaySource = (math: string, offset: number, source: string): string => {
+    const prefix = source.slice(source.lastIndexOf('\n', offset - 1) + 1, offset);
+    const quote = prefix.match(/^(?: {0,3}>[ \t]?)+/u)?.[0];
+    if (!quote) return math.trim();
+    const depth = (quote.match(/>/g) || []).length;
+    return math.split('\n').map(line => {
+      for (let i = 0; i < depth; i++) line = line.replace(/^ {0,3}>[ \t]?/, '');
+      return line;
+    }).join('\n').trim();
+  };
+  protectedContent = protectedContent.replace(/\$\$([\s\S]+?)\$\$/g, (literal, math, offset, source) => {
     const idx = displayMathList.length;
-    displayMathList.push(math.trim());
+    displayMathList.push(displaySource(math, offset, source));
+    displayLiterals.push(literal);
     return `${markerPrefix}DISPLAY_${idx}@@@`;
   });
 
-  protectedContent = protectedContent.replace(/\\\[([\s\S]+?)\\\]/g, (_, math) => {
+  protectedContent = protectedContent.replace(/\\\[([\s\S]+?)\\\]/g, (literal, math, offset, source) => {
     const idx = displayMathList.length;
-    displayMathList.push(math.trim());
+    displayMathList.push(displaySource(math, offset, source));
+    displayLiterals.push(literal);
     return `${markerPrefix}DISPLAY_${idx}@@@`;
   });
 
   // 3. Extract and protect Inline Math: $ ... $ and \( ... \)
   const inlineMathList: string[] = [];
+  const inlineLiterals: string[] = [];
   // Digits and leading TeX whitespace may start math. Stop at unescaped delimiters instead of crossing into the next formula;
   // a closing dollar before a digit remains literal for currency such as "$100 and $50".
   const inlineDollar = /(?<!\\)\$(?!\$)((?:\\[^\r\n]|[^\\$\r\n])+?)(?<!\s)\$(?!\d)/g;
@@ -188,14 +208,16 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
     }
     const idx = inlineMathList.length;
     inlineMathList.push(math.trim());
+    inlineLiterals.push(match[0]);
     inlineContent += protectedContent.slice(inlineOffset, match.index) + `${markerPrefix}INLINE_${idx}@@@`;
     inlineOffset = inlineDollar.lastIndex;
   }
   protectedContent = inlineContent + protectedContent.slice(inlineOffset);
 
-  protectedContent = protectedContent.replace(/\\\(([\s\S]+?)\\\)/g, (_, math) => {
+  protectedContent = protectedContent.replace(/\\\(([\s\S]+?)\\\)/g, (literal, math) => {
     const idx = inlineMathList.length;
     inlineMathList.push(math.trim());
+    inlineLiterals.push(literal);
     return `${markerPrefix}INLINE_${idx}@@@`;
   });
 
@@ -218,6 +240,11 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
 
   // 7. Parse with Markdown-it
   let renderedHtml = md.render(protectedContent, { readonly: isReadonly });
+
+  // Attribute values are literal Markdown data, never HTML math insertion sites.
+  renderedHtml = renderedHtml.replace(/<[^>]*>/g, tag => tag
+    .replace(markerPattern('INLINE'), (_, index) => escapeHtml(inlineLiterals[Number(index)]))
+    .replace(markerPattern('DISPLAY'), (_, index) => escapeHtml(displayLiterals[Number(index)])));
 
   const MAX_MATH_COUNT = 500;
 
@@ -245,6 +272,7 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
   {
     const currentDir = options.currentFilePath?.substring(0, options.currentFilePath.lastIndexOf('/'));
     renderedHtml = renderedHtml.replace(/<img\s+([^>]*?)src=(["'])(.*?)\2([^>]*?)>/gi, (fullImg, before, quote, src, after) => {
+      src = md.utils.unescapeAll(src);
       let resolvedSrc = src;
       if (currentDir !== undefined && !/^(data:|mored:|(https?:)?\/\/)/i.test(src)) {
         // Markdown-it URL-encodes spaces and non-ASCII names; decode once before file access.
@@ -263,7 +291,7 @@ export function parseMarkdown(content: string, options: ParseOptions = {}): stri
           return `<div class="remote-image-blocked" data-original-src="${escapeHtml(src)}" data-original-alt="${escapeHtml(md.utils.unescapeAll(alt))}" data-original-title="${escapeHtml(md.utils.unescapeAll(title))}" contenteditable="false" title="远程图片已默认拦截以保护隐私 (可在设置中启用)">[远程图片已拦截: ${escapeHtml(src)}]</div>`;
         }
       }
-      return `<img ${before}src=${quote}${resolvedSrc}${quote}${after} data-original-src="${escapeHtml(src)}" loading="lazy" class="mored-image">`;
+      return `<img ${before}src=${quote}${escapeHtml(resolvedSrc)}${quote}${after} data-original-src="${escapeHtml(src)}" loading="lazy" class="mored-image">`;
     });
   }
 

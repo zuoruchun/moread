@@ -96,6 +96,15 @@ public enum LocalFileAccessPolicy {
                 offset += count
             }
         }
+        if exists {
+            let originalDescriptor = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            guard originalDescriptor >= 0 else { throw failure("无法读取原文件元数据") }
+            defer { close(originalDescriptor) }
+            _ = try validateDescriptor(originalDescriptor, roots: allowedDirectories, directory: false)
+            guard fcopyfile(originalDescriptor, descriptor, nil, copyfile_flags_t(COPYFILE_XATTR | COPYFILE_ACL)) == 0 else {
+                throw failure("无法保留原文件元数据")
+            }
+        }
         if exists { guard fchmod(descriptor, original.st_mode & 0o777) == 0 else { throw failure("无法保留文件权限") } }
         guard fsync(descriptor) == 0 else { throw failure("无法同步保存内容") }
         _ = try validateDescriptor(parent, roots: allowedDirectories, directory: true)

@@ -201,3 +201,25 @@ describe('Markdown Parser & Academic Content Pipeline', () => {
     expect(allowed).toContain('https://example.com/plot.png');
   });
 });
+
+describe('Parser context regressions', () => {
+  it('does not insert math markup into image attributes or link destinations', () => {
+    const html = parseMarkdown('![plot $x$](image.png) [link](https://example.invalid/$x$)');
+    expect(html).toContain('alt="plot $x$"');
+    expect(html).toContain('href="https://example.invalid/$x$"');
+    expect(html).not.toContain('math-inline-wrapper');
+  });
+  it('resolves ampersands in local image paths exactly once', () => {
+    const html = parseMarkdown('![A](a&b.png)', { currentFilePath: '/audit/doc.md' });
+    expect(html).toContain('path=%2Faudit%2Fa%26b.png');
+    expect(html).not.toContain('%26amp%3B');
+  });
+  it('removes blockquote prefixes from display math', () => {
+    const html = parseMarkdown('> $$\n> x^2\n> $$');
+    expect(html).toContain('data-raw-formula="x^2"');
+  });
+  it('keeps generated heading anchors unique across suffix collisions', () => {
+    const headings = extractHeadings('# A\n# A\n# A-1\n# A\n# A-1-2');
+    expect(new Set(headings.map(h => h.id)).size).toBe(headings.length);
+  });
+});

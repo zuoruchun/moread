@@ -120,3 +120,29 @@ describe('Editor HTML to Markdown Converter', () => {
     expect(htmlToMarkdown(html)).toBe('````markdown\n```js\nconst x = 1;\n```\n````\n');
   });
 });
+
+describe('Content preservation regressions', () => {
+  it('keeps loose task list states', () => {
+    const md = htmlToMarkdown(parseMarkdown('- [ ] first\n\n- [x] second\n', { readonly: false }));
+    expect(md).toContain('[ ] first');
+    expect(md).toContain('[x] second');
+  });
+  it('escapes code pipes in table cells on every roundtrip', () => {
+    let md = '| Name | Value |\n| --- | --- |\n| a | `x\\|y` |\n';
+    for (let i = 0; i < 3; i++) {
+      md = htmlToMarkdown(parseMarkdown(md));
+      expect(md).toContain('`x\\|y`');
+      expect(parseMarkdown(md)).toContain('<code>x|y</code>');
+    }
+  });
+  it('preserves empty tables without blocking document serialization', () => {
+    expect(htmlToMarkdown('<table></table><p>Edited</p>')).toContain('Edited');
+  });
+});
+
+ it('preserves TeX pipes while still escaping pipes in code containing dollars', () => {
+   const math = htmlToMarkdown(parseMarkdown('| A | B |\n| --- | --- |\n| a | $|x|$ |'));
+   expect(math).toContain('$|x|$');
+   const code = htmlToMarkdown(parseMarkdown('| A | B |\n| --- | --- |\n| a | `$x\\|y$` |'));
+   expect(code).toContain('`$x\\|y$`');
+ });

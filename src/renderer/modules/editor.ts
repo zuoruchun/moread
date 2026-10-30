@@ -20,6 +20,28 @@ export function createTurndownService(): TurndownService {
 
   turndown.use(gfm);
 
+  // Override GFM assumptions that do not hold for editable, loose lists and empty tables.
+  turndown.addRule('taskCheckbox', {
+    filter: node => node.nodeName === 'INPUT' && (node as HTMLInputElement).type === 'checkbox' && !!node.closest('li'),
+    replacement: (_content, node) => (node as HTMLInputElement).checked ? '[x] ' : '[ ] '
+  });
+  turndown.addRule('emptyTable', {
+    filter: node => node.nodeName === 'TABLE' && !(node as HTMLTableElement).rows.length,
+    replacement: (_content, node) => `\n\n${(node as HTMLElement).outerHTML}\n\n`
+  });
+  turndown.addRule('tableCellEscapes', {
+    filter: ['th', 'td'],
+    replacement: (content, node) => {
+      // Even code spans require escaped pipes inside GFM tables.
+      const escapePipes = (text: string) => text.replace(/(\\*)\|/g, (_match, slashes) => slashes.length % 2 ? `${slashes}|` : `${slashes}\\|`);
+      // The parser protects math before splitting tables; keep its TeX pipes literal.
+      // Match code first so dollar signs inside code cannot exempt a table separator.
+      const escaped = content.split(/(`+[^`]*(?:`[^`]+)*?`+|\$[^$\n]+\$)/g)
+        .map(part => part.startsWith('$') && part.endsWith('$') ? part : escapePipes(part)).join('');
+      return `${node.previousElementSibling ? ' ' : '| '}${escaped} |`;
+    }
+  });
+
   // 1. Math block wrapper rule
   turndown.addRule('mathBlock', {
     filter: (node) => {

@@ -691,6 +691,11 @@ export class MoReadApp {
       }
     }
 
+    const previous = this.activeTab;
+    this.cancelAutoSave();
+    if (previous?.isEdited && previous.filePath && this.currentSettings.saveMode === 'auto' && !previous.autoSavePaused && !this.isComposing) {
+      void this.saveTab(previous);
+    }
     this.activeTabId = tabId;
     const tab = this.activeTab;
     if (!tab) return;
@@ -699,6 +704,7 @@ export class MoReadApp {
     this.renderTabBar();
     this.renderActiveTabContent();
     this.updateSaveStatus();
+    this.scheduleAutoSave();
   }
 
   public renderTabBar(): void {
@@ -1322,6 +1328,8 @@ export class MoReadApp {
         if (this.activeTab === tab) this.showError(res.error || '重新读取文件失败');
         return;
       }
+      tab.hasBOM = res.stats?.hasBOM ?? tab.hasBOM;
+      tab.lineEnding = res.stats?.lineEnding ?? tab.lineEnding;
       const canDiscard = discardLocalEdits && tab.editRevision === editRevision;
       if (!canDiscard && res.content === tab.savedContent) {
         // Metadata-only and duplicate notifications must not replace the DOM.
@@ -1334,7 +1342,7 @@ export class MoReadApp {
           this.conflictBannerEl.classList.remove('hidden');
           this.conflictBannerEl.style.display = 'flex';
         }
-        this.pauseAutoSave('文件已被外部修改，自动保存已暂停；请先处理冲突。');
+        this.pauseAutoSave('文件已被外部修改，自动保存已暂停；请先处理冲突。', tab);
         return;
       }
       const contentChanged = res.content !== tab.rawContent || (canDiscard && tab.isEdited);
